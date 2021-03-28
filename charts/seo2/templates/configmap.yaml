@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "seo2.fullname" . }}
+  namespace: {{ include "seo2.namespace" . }}
+  labels:
+    {{- include "seo2.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {{- toJson .Values.config | nindent 4 }}
