@@ -6,7 +6,7 @@ This is a program written in python, installed as a deamonset in your AKS cluste
 ## not a short story about what this is about and what it's used for
 
 Azure does VM maintenance from time to time and lets you know a little bit in advance via scheduled events.
-https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-even
+https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events
 
 This listens for scheduled events. It then takes automatic action to avoid service downtime.
 If a scheduled event occurs, it automatically drain the node in preparation for maintenance.
