@@ -19,7 +19,7 @@ metadata_instance_url = "http://169.254.169.254/metadata/instance?api-version=20
 
 class Context(object):
     def __init__(self):
-        self.exit = threading.Event()
+        self.exit_event = threading.Event()
         self.processed_events = []
         self.this_hostnames = get_this_hostnames()
 
@@ -107,7 +107,7 @@ def get_scheduled_events():
 
 def start_scheduled_event(context, eventid):
     print_(f"Starting scheduled event.", eventid=eventid)
-    if context.exit.wait(30):  # give some time to collect logs
+    if context.exit_event.wait(30):  # give some time to external monitoring to collect logs
         return
     data = {"StartRequests": [{"EventId": eventid}]}
     databytes = json.dumps(data).encode('utf-8')
@@ -151,15 +151,19 @@ def handle_scheduled_event(context, eventid):
     nodename = context.this_hostnames["nodename"]
     subprocess_run(f"kubectl cordon {nodename}", eventid)
     subprocess_run(f"kubectl drain {nodename} --delete-emptydir-data --ignore-daemonsets", eventid)
+
+    # Perhaps this script will be killed before it can be executed.
+    # However, nothing happened, the node remains 'unschedulable' and will soon be removed by the cluster autoscaler.
     uncordon_timer = threading.Timer(context.uncordon_delay_seconds,
                                      lambda: subprocess_run(f"kubectl uncordon {nodename}", eventid))
     uncordon_timer.start()
+
     start_scheduled_event(context, eventid)
 
 
 def the_end(context, signal_number, current_stack_frame):
     print_(f"Interrupted by signal {signal_number}, shutting down.")
-    context.exit.set()
+    context.exit_event.set()
 
 
 def main():
@@ -178,7 +182,7 @@ def main():
             print_("Another iteration of the operator's main loop has begun, i.e. the program is still running.")
             data = get_scheduled_events()
             handle_scheduled_events(context, data)
-            if context.exit.wait(context.loop_sleep_seconds):
+            if context.exit_event.wait(context.loop_sleep_seconds):
                 break
 
     except Exception:
