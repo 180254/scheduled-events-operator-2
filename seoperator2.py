@@ -53,18 +53,20 @@ def read_config_file():
 
 def print_(message, **kwargs):
     timestamp = datetime.datetime.utcnow().astimezone().replace(microsecond=0).isoformat()
-    print(json.dumps({"timestamp": timestamp, "message": message, **kwargs}))
+    print(json.dumps({"timestamp": timestamp, "message": message, **kwargs}), flush=True)
 
 
 def subprocess_run(cmd, eventid):
     print_(f"Running a command: {cmd} for {eventid}.", eventid=eventid)
     timestamp = datetime.datetime.utcnow().astimezone().replace(microsecond=0).isoformat()
-    json_formatter = \
-        f" 2>&1 " \
-        f"| jq -cRM " \
-        f"--arg timestamp '{timestamp}' --arg eventid '{eventid}' " \
-        f"'{{timestamp: $timestamp, message: ., eventid: $eventid}}'"
-    subprocess.run([cmd + json_formatter], stdin=None, stdout=None, stderr=None, shell=True)
+    json_formatter = ["jq", "-cRM",
+                      "--arg", "subprocess", " ".join(cmd),
+                      "--arg", "timestamp", timestamp,
+                      "--arg", "eventid", eventid,
+                      '{timestamp: $timestamp, subprocess: $subprocess, message: ., eventid: $eventid}']
+    cmd_subprocess = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    subprocess.Popen(json_formatter, stdin=cmd_subprocess.stdout, stdout=None, stderr=None)
+    cmd_subprocess.wait(1800)
 
 
 def b36_encode(num):
@@ -108,7 +110,9 @@ def get_scheduled_events():
 
 def start_scheduled_event(context, eventid):
     print_(f"Starting scheduled event.", eventid=eventid)
-    if context.exit_event.wait(30):  # give some time to external monitoring to collect logs
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if context.exit_event.wait(5):  # give some time to external monitoring to collect logs
         return
     data = {"StartRequests": [{"EventId": eventid}]}
     databytes = json.dumps(data).encode('utf-8')
@@ -150,13 +154,13 @@ def handle_scheduled_events(context, scheduled_events):
 
 def handle_scheduled_event(context, eventid):
     nodename = context.this_hostnames["nodename"]
-    subprocess_run(f"kubectl cordon {nodename}", eventid)
-    subprocess_run(f"kubectl drain {nodename} --delete-emptydir-data --ignore-daemonsets", eventid)
+    subprocess_run(["kubectl", "cordon", nodename], eventid)
+    subprocess_run(["kubectl", "drain", nodename, "--delete-emptydir-data", "--ignore-daemonsets"], eventid)
 
     # Perhaps this script will be killed before it can be executed.
     # However, nothing happened, the node remains 'unschedulable' and will soon be removed by the cluster autoscaler.
     uncordon_timer = threading.Timer(context.uncordon_delay_seconds,
-                                     lambda: subprocess_run(f"kubectl uncordon {nodename}", eventid))
+                                     lambda: subprocess_run(["kubectl", "uncordon", nodename], eventid))
     uncordon_timer.start()
 
     start_scheduled_event(context, eventid)

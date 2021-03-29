@@ -17,7 +17,7 @@ For this to work, your cluster&application must respond correctly to a node drai
 In particular, you need: a working graceful shutdown, PodDisruptionBudget policy.
 
 The program works in a painfully simple way, it has dependencies on several external programs (kubectl, jq).
-Docker image size is under 100 MB, python and kubectl take up some disk space.
+Docker image size is under 50 MB, python and dependencies take up some disk space.
 
 ## how to build and run this
 
