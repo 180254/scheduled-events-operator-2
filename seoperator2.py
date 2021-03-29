@@ -5,6 +5,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import traceback
 import typing
@@ -188,7 +189,7 @@ def main():
     except Exception:
         traceback_formatted = str(traceback.format_exc())
         print_("Fatal error in the main loop.", traceback=traceback_formatted)
-        exit(1)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
