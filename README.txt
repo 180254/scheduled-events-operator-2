@@ -16,7 +16,7 @@ The node will become useful again after a period of time, or it will soon be rem
 For this to work, your cluster&application must respond correctly to a node drain operation.
 In particular, you need: a working graceful shutdown, PodDisruptionBudget policy.
 
-The program works in a painfully simple way, it has dependencies on several external programs (kubectl, jq).
+The program works in a painfully simple way, it has dependencies on several external programs (kubectl).
 Docker image size is under 50 MB, python and dependencies take up some disk space.
 
 ## how to build and run this

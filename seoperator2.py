@@ -34,6 +34,7 @@ class Context(object):
     def serialize(self):
         return {
             "main_loop_rate": self.main_loop_rate,
+            "socket_timeout": self.socket_timeout,
             "ignored_event_types": self.ignored_event_types,
             "kubectl_drain_options": self.kubectl_drain_options,
             "kubectl_uncordon_delay": self.kubectl_uncordon_delay,
@@ -56,17 +57,18 @@ def print_(message, **kwargs):
     print(json.dumps({"timestamp": timestamp, "message": message, **kwargs}), flush=True)
 
 
+def subprocess_stdout_reader(cmd, eventid, proc):
+    subprocess = " ".join(cmd)
+    for message in proc.stdout:
+        print_(message, eventid=eventid, subprocess=subprocess)
+
+
 def subprocess_run(cmd, eventid):
     print_(f"Running a command: {cmd} for {eventid}.", eventid=eventid)
-    timestamp = datetime.datetime.utcnow().astimezone().replace(microsecond=0).isoformat()
-    json_formatter = ["jq", "-cRM",
-                      "--arg", "subprocess", " ".join(cmd),
-                      "--arg", "timestamp", timestamp,
-                      "--arg", "eventid", eventid,
-                      '{timestamp: $timestamp, subprocess: $subprocess, message: ., eventid: $eventid}']
-    cmd_subprocess = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    subprocess.Popen(json_formatter, stdin=cmd_subprocess.stdout, stdout=None, stderr=None)
-    cmd_subprocess.wait()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    proc_output_reader = threading.Thread(target=subprocess_stdout_reader, args=(cmd, eventid, proc))
+    proc_output_reader.start()
+    proc.wait()
 
 
 def b36_encode(num):
@@ -100,25 +102,23 @@ def get_this_hostnames(socket_timeout):
         }
 
 
-def get_scheduled_events(socket_timeout):
+def get_scheduled_events(context):
     request = urllib.request.Request(metadata_scheduledevents_url)
     request.add_header("Metadata", "true")
-    with urllib.request.urlopen(request, timeout=socket_timeout) as response:
+    with urllib.request.urlopen(request, timeout=context.socket_timeout) as response:
         metadata_scheduledevents = json.loads(response.read())
         return metadata_scheduledevents
 
 
 def start_scheduled_event(context, eventid):
     print_(f"Starting scheduled event.", eventid=eventid)
-    sys.stdout.flush()
-    sys.stderr.flush()
     if context.exit_threading_event.wait(5):  # give some time to external monitoring to collect logs
         return
     data = {"StartRequests": [{"EventId": eventid}]}
     databytes = json.dumps(data).encode('utf-8')
     request = urllib.request.Request(metadata_scheduledevents_url, data=databytes)
     request.add_header("Metadata", "true")
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.urlopen(request, timeout=context.socket_timeout) as response:
         return response.read()
 
 
@@ -185,7 +185,7 @@ def main():
 
         while True:
             print_("Another iteration of the operator's main loop has begun, i.e. the program is still running.")
-            data = get_scheduled_events(context.socket_timeout)
+            data = get_scheduled_events(context)
             handle_scheduled_events(context, data)
             if context.exit_threading_event.wait(context.main_loop_rate):
                 break
