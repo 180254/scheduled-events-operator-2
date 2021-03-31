@@ -54,9 +54,15 @@ tolerations: []
 affinity: {}
 
 config:
-  ignoreEventsOfTypes:
+  main-loop-rate: 60
+  socket-timeout: 10
+  ignored-event-types:
     - Freeze
-#    - Reboot
-#    - Redeploy
-#    - Preempt
-#    - Terminate
+  #    - Reboot
+  #    - Redeploy
+  #    - Preempt
+  #    - Terminate
+  kubectl-drain-options:
+    - --delete-emptydir-data
+    - --ignore-daemonsets
+  kubectl-uncordon-delay: 120

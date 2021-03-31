@@ -20,22 +20,26 @@ metadata_instance_url = "http://169.254.169.254/metadata/instance?api-version=20
 
 class Context(object):
     def __init__(self):
-        self.exit_event = threading.Event()
-        self.processed_events = []
-        self.this_hostnames = get_this_hostnames()
-
         config_data = read_config_file()
-        self.ignore_events_of_types = config_data["ignoreEventsOfTypes"]
-        self.loop_sleep_seconds = config_data["loopSleepSeconds"]
-        self.uncordon_delay_seconds = config_data["uncordonDelaySeconds"]
+        self.main_loop_rate = config_data.get("main-loop-rate", 60)
+        self.socket_timeout = config_data.get("socket-timeout", 10)
+        self.ignored_event_types = config_data.get("ignored-event-types", [])
+        self.kubectl_drain_options = config_data.get("kubectl-drain-options", [])
+        self.kubectl_uncordon_delay = config_data.get("kubectl-uncordon-delay", 120)
+
+        self.this_hostnames = get_this_hostnames(self.socket_timeout)
+        self.exit_threading_event = threading.Event()
+        self.already_processed_events = []
 
     def serialize(self):
         return {
-            "processed_events": self.processed_events,
+            "main_loop_rate": self.main_loop_rate,
+            "ignored_event_types": self.ignored_event_types,
+            "kubectl_drain_options": self.kubectl_drain_options,
+            "kubectl_uncordon_delay": self.kubectl_uncordon_delay,
             "this_hostnames": self.this_hostnames,
-            "ignore_events_of_types": self.ignore_events_of_types,
-            "loop_sleep_seconds": self.loop_sleep_seconds,
-            "uncordon_delay_seconds": self.uncordon_delay_seconds,
+            "exit_threading_event": self.exit_threading_event.is_set(),
+            "already_processed_events": self.already_processed_events,
         }
 
 
@@ -44,10 +48,6 @@ def read_config_file():
     if os.path.isfile(config_file):
         with open(config_file) as f:
             config_data = json.load(f)
-    config_data.setdefault("ignoreEventsOfTypes", [])
-    config_data.setdefault("loopSleepSeconds", 60)
-    config_data.setdefault("uncordonDelaySeconds", 120)
-    config_data["ignoreEventsOfTypes"] = list(map(str.lower, config_data["ignoreEventsOfTypes"]))
     return config_data
 
 
@@ -66,7 +66,7 @@ def subprocess_run(cmd, eventid):
                       '{timestamp: $timestamp, subprocess: $subprocess, message: ., eventid: $eventid}']
     cmd_subprocess = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     subprocess.Popen(json_formatter, stdin=cmd_subprocess.stdout, stdout=None, stderr=None)
-    cmd_subprocess.wait(1800)
+    cmd_subprocess.wait()
 
 
 def b36_encode(num):
@@ -87,10 +87,10 @@ def compute_name_to_node_name(compute_name):
     return name_prefix + vm_index_base36.rjust(6, '0')
 
 
-def get_this_hostnames():
+def get_this_hostnames(socket_timeout):
     request = urllib.request.Request(metadata_instance_url)
     request.add_header("Metadata", "true")
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.urlopen(request, timeout=socket_timeout) as response:
         metadata_instance = json.loads(response.read())
         compute_name = metadata_instance.get("compute").get("name")
         return {
@@ -100,10 +100,10 @@ def get_this_hostnames():
         }
 
 
-def get_scheduled_events():
+def get_scheduled_events(socket_timeout):
     request = urllib.request.Request(metadata_scheduledevents_url)
     request.add_header("Metadata", "true")
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.urlopen(request, timeout=socket_timeout) as response:
         metadata_scheduledevents = json.loads(response.read())
         return metadata_scheduledevents
 
@@ -112,7 +112,7 @@ def start_scheduled_event(context, eventid):
     print_(f"Starting scheduled event.", eventid=eventid)
     sys.stdout.flush()
     sys.stderr.flush()
-    if context.exit_event.wait(5):  # give some time to external monitoring to collect logs
+    if context.exit_threading_event.wait(5):  # give some time to external monitoring to collect logs
         return
     data = {"StartRequests": [{"EventId": eventid}]}
     databytes = json.dumps(data).encode('utf-8')
@@ -136,12 +136,12 @@ def handle_scheduled_events(context, scheduled_events):
         resourcetype = event['ResourceType']
         notbefore = event['NotBefore']
 
-        if eventid not in context.processed_events:
+        if eventid not in context.already_processed_events:
             print_(f"A new event was found {eventid} ({eventtype}).", eventid=eventid)
 
             if eventstatus == "Scheduled" \
                     and any(hostname in resources for hostname in context.this_hostnames.values()) \
-                    and eventtype.lower() not in context.ignore_events_of_types:
+                    and eventtype.lower() not in context.ignored_event_types:
                 print_(f"Handling the event {eventid}.", eventid=eventid)
                 handle_scheduled_event(context, eventid)
                 print_(f"Handled the event {eventid}.", eventid=eventid)
@@ -149,17 +149,17 @@ def handle_scheduled_events(context, scheduled_events):
             else:
                 print_(f"Skipping the event {eventid}.", eventid=eventid)
 
-            context.processed_events.append(eventid)
+            context.already_processed_events.append(eventid)
 
 
 def handle_scheduled_event(context, eventid):
     nodename = context.this_hostnames["nodename"]
     subprocess_run(["kubectl", "cordon", nodename], eventid)
-    subprocess_run(["kubectl", "drain", nodename, "--delete-emptydir-data", "--ignore-daemonsets"], eventid)
+    subprocess_run(["kubectl", "drain", nodename] + context.kubectl_drain_options, eventid)
 
     # Perhaps this script will be killed before it can be executed.
     # However, nothing happened, the node remains 'unschedulable' and will soon be removed by the cluster autoscaler.
-    uncordon_timer = threading.Timer(context.uncordon_delay_seconds,
+    uncordon_timer = threading.Timer(context.kubectl_uncordon_delay,
                                      lambda: subprocess_run(["kubectl", "uncordon", nodename], eventid))
     uncordon_timer.start()
 
@@ -168,7 +168,7 @@ def handle_scheduled_event(context, eventid):
 
 def the_end(context, signal_number, current_stack_frame):
     print_(f"Interrupted by signal {signal_number}, shutting down.")
-    context.exit_event.set()
+    context.exit_threading_event.set()
 
 
 def main():
@@ -185,9 +185,9 @@ def main():
 
         while True:
             print_("Another iteration of the operator's main loop has begun, i.e. the program is still running.")
-            data = get_scheduled_events()
+            data = get_scheduled_events(context.socket_timeout)
             handle_scheduled_events(context, data)
-            if context.exit_event.wait(context.loop_sleep_seconds):
+            if context.exit_threading_event.wait(context.main_loop_rate):
                 break
 
     except Exception:
