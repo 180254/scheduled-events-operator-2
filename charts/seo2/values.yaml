@@ -54,6 +54,9 @@ tolerations: []
 affinity: {}
 
 config:
+  api-metadata-scheduledevents-url: "http://169.254.169.254/metadata/scheduledevents?api-version=2019-08-01"
+  api-metadata-instance-url: "http://169.254.169.254/metadata/instance?api-version=2020-09-01"
+  cache-dir: "/cache"
   main-loop-rate: 60
   socket-timeout: 10
   ignored-event-types:
@@ -65,4 +68,3 @@ config:
   kubectl-drain-options:
     - --delete-emptydir-data
     - --ignore-daemonsets
-  kubectl-uncordon-delay: 120

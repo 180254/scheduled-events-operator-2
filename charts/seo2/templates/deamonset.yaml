@@ -30,17 +30,26 @@ spec:
           configMap:
             defaultMode: 0444
             name: {{ include "seo2.fullname" . }}
+        - name: cache-volume
+          emptyDir: {}
       containers:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          command:
+            - /app/seoperator2/seoperator2
+          args:
+            - /config/config.json
+            - /cache
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - name: {{ include "seo2.fullname" . }}
-              mountPath: /config/
+              mountPath: /config
+            - name: cache-volume
+              mountPath: /cache
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
