@@ -1,9 +1,8 @@
-FROM bitnami/minideb:latest as base_builder
+FROM bitnami/python:3.9 as base_builder
 RUN mkdir -p /app;
 RUN install_packages curl ca-certificates;
-RUN install_packages python3 python3-pip python3-dev;
 RUN install_packages build-essential upx;
-RUN pip3 install https://github.com/pyinstaller/pyinstaller/tarball/develop;
+RUN pip3 install pyinstaller;
 
 FROM base_builder as kubectl_builder
 RUN set -eux; \
