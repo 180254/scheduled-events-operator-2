@@ -1,4 +1,8 @@
 .idea/
+seoperator2.spec
 build/
 dist/
-notes.txt
+seoperator2.build/
+seoperator2.dist/
+seoperator2.bin
+mega-*
