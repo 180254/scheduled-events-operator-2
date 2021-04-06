@@ -1,6 +1,7 @@
 #!/usr/bin/python3 -u
-import copy
+import abc
 import datetime
+import email.utils
 import json
 import os
 import pickle
@@ -9,16 +10,45 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, TypeVar, Generic, List, Dict
+from typing import Any, TypeVar, Generic, List, Iterator, Iterable, Dict
 
 T = TypeVar("T")
 
 
-class Cacheable(Generic[T]):
+# Serialize arbitrary Python objects to JSON.
+# Fixes: TypeError: Object of type Xyz is not JSON serializable
+# Fix consists of JsonSerializable, JsonSerializableEncoder.
+class JsonSerializable(abc.ABC):
+
+    @abc.abstractmethod
+    def to_json(self) -> Any:
+        pass
+
+
+# Take a look at the documentation of JsonSerializable.
+class JsonSerializableEncoder(json.JSONEncoder):
+
+    def default(self, o: Any):
+        if isinstance(o, JsonSerializable):
+            return o.to_json()
+        return json.JSONEncoder.default(self, o)
+
+
+# print in a version that produces output containing json.
+def print_(message: str, **kwargs) -> None:
+    timestamp = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+    print(json.dumps({"timestamp": timestamp, "message": message, **kwargs}, cls=JsonSerializableEncoder), flush=True)
+
+
+# An interface that provides methods to "cache" (save) state.
+# The state is stored on disk, under the specified key.
+class Cacheable(Generic[T], object):
+
     def __init__(self, cache_dir: str) -> None:
         super().__init__()
         self.cache_dir: str = cache_dir
@@ -45,17 +75,14 @@ class Cacheable(Generic[T]):
         pass
 
 
-class CacheableList(Cacheable[T]):
-    def __init__(self, cache_dir: str, name: str):
+# A list that saves the state to disk with each change.
+# The list recreates its last state in the constructor, so it is immune to container restarts.
+class CacheableList(Cacheable[T], Iterable[T], JsonSerializable, object):
+
+    def __init__(self, cache_dir: str, name: str) -> None:
         super().__init__(cache_dir)
         self._name: str = name
         self._list: List[T] = super()._cache_read(name, [])
-
-    def values(self) -> List[T]:
-        return copy.copy(self._list)
-
-    def len(self) -> int:
-        return len(self._list)
 
     def append(self, value: T) -> None:
         self._list.append(value)
@@ -65,226 +92,365 @@ class CacheableList(Cacheable[T]):
         self._list.remove(value)
         self._cache_write(self._name, self._list)
 
+    def __len__(self) -> int:
+        return len(self._list)
 
-class Context(object):
-    def __init__(self, config_file_path: str, cache_dir: str):
-        self.config_file_path: str = config_file_path
-        self.cache_dir = cache_dir
+    def __iter__(self) -> Iterator[T]:
+        return iter(self._list)
 
-        config_data = read_config_file(config_file_path)
+    def __str__(self) -> str:
+        return f"{self._list!s}"
 
-        self.api_metadata_instance_url: str = \
-            config_data.get("api-metadata-instance-url",
-                            "http://169.254.169.254/metadata/scheduledevents?api-version=2019-08-01")
-        self.api_metadata_scheduledevents_url: str = \
-            config_data.get("api-metadata-scheduledevents-url",
-                            "http://169.254.169.254/metadata/instance?api-version=2020-09-01")
+    def __repr__(self) -> str:
+        return (f"{self.__class__.__name__}("
+                f"{self._name!r}, {self._list!r})")
 
-        self.main_loop_rate: int = config_data.get("main-loop-rate", 60)
-        self.socket_timeout: int = config_data.get("socket-timeout", 10)
-        self.ignored_event_types: List[str] = config_data.get("ignored-event-types", [])
-        self.kubectl_drain_options: List[str] = config_data.get("kubectl-drain-options", [])
+    def to_json(self) -> List[T]:
+        return self._list
 
-        self.this_hostnames: Dict[str, str] = get_this_hostnames(self)
+
+# This class has easily accessible information about the name of the VM on which this script is running.
+# The "Azure Instance Metadata Service (Linux)" is helpful.
+# https://docs.microsoft.com/en-us/azure/virtual-machines/linux/instance-metadata-service?tabs=linux
+class ThisHostnames(JsonSerializable, object):
+
+    def __init__(self, api_metadata_instance: str, socket_timeout_seconds: int) -> None:
+        request = urllib.request.Request(api_metadata_instance)
+        request.add_header("Metadata", "true")
+        with urllib.request.urlopen(request, timeout=socket_timeout_seconds) as response:
+            metadata_instance = json.loads(response.read())
+            self.hostname = socket.gethostname()
+            self.compute_name = metadata_instance.get("compute").get("name")
+            self.node_name = self._compute_name_to_node_name(self.compute_name)
+
+    # example
+    #   input: aks-default-36328368-vmss_18
+    #   output: aks-default-36328368-vmss00000i
+    @staticmethod
+    def _compute_name_to_node_name(compute_name: str) -> str:
+        name_prefix, vm_index_base10 = compute_name.split("_")
+        vm_index_base36 = ThisHostnames._b36_encode(int(vm_index_base10))
+        return name_prefix + vm_index_base36.rjust(6, "0")
+
+    @staticmethod
+    def _b36_encode(num: int) -> str:
+        digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+        result = ""
+        while not result or num > 0:
+            num, i = divmod(num, 36)
+            result = digits[i] + result
+        return result
+
+    def __str__(self) -> str:
+        return f"{self.hostname!r}, {self.compute_name!r}, {self.node_name!r})"
+
+    def __repr__(self) -> str:
+        return (f"{self.__class__.__name__}("
+                f"{self.hostname!r}, {self.compute_name!r}, {self.node_name!r})")
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "hostname": self.hostname,
+            "compute_name": self.compute_name,
+            "node_name": self.node_name,
+        }
+
+
+# An object-oriented representation of a single "scheduled event".
+# https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events#query-for-events
+class ScheduledEvent(JsonSerializable, object):
+
+    def __init__(self, event: Dict[str, Any]) -> None:
+        super().__init__()
+        self._raw: Dict[str, Any] = event
+        self.eventid: str = event.get("EventId")
+        self.eventtype: str = event.get("EventType")
+        self.resourcetype: str = event.get("ResourceType")
+        self.resources: List[str] = event.get("Resources")
+        self.eventstatus: str = event.get("EventStatus")
+        self.notbefore: datetime = self._parsedate_to_datetime(event.get("NotBefore"))
+        self.description: str = event.get("Description")
+        self.eventsource: str = event.get("EventSource")
+
+    @staticmethod
+    # # https://bugs.python.org/issue30681
+    def _parsedate_to_datetime(value) -> datetime:
+        try:
+            return email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+
+    def __str__(self) -> str:
+        return str(self._raw)
+
+    def __repr__(self) -> str:
+        return repr(self._raw)
+
+    def to_json(self) -> Dict[str, Any]:
+        return self._raw
+
+
+# An object-oriented representation of a whole "scheduled events" response.
+# https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events#query-for-events
+class ScheduledEvents(Iterable[ScheduledEvent], JsonSerializable, object):
+
+    def __init__(self, events: Dict[str, Any]) -> None:
+        super().__init__()
+        self._raw: Dict[str, Any] = events
+        self.document_incarnation: int = events.get("DocumentIncarnation")
+        self.events: List[ScheduledEvent] = list(map(ScheduledEvent, events.get("Events", [])))
+
+    def __len__(self) -> int:
+        return len(self.events)
+
+    def __iter__(self) -> Iterator[ScheduledEvent]:
+        return iter(self.events)
+
+    def __str__(self) -> str:
+        return str(self._raw)
+
+    def __repr__(self) -> str:
+        return repr(self._raw)
+
+    def to_json(self) -> Dict[str, Any]:
+        return self._raw
+
+
+# A tool to perform operations on the "scheduled events" API.
+# https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events#query-for-events
+# https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events#start-an-event
+class ScheduledEventsManager(object):
+
+    def __init__(self,
+                 api_metadata_scheduledevents: str,
+                 socket_timeout_seconds: int,
+                 delay_before_program_close_seconds: int) -> None:
+        super().__init__()
+        self.api_metadata_scheduledevents: str = api_metadata_scheduledevents
+        self.socket_timeout: int = socket_timeout_seconds
+        self.delay_before_program_close_seconds: int = delay_before_program_close_seconds
+
+    def query_for_events(self) -> ScheduledEvents:
+        request = urllib.request.Request(self.api_metadata_scheduledevents)
+        request.add_header("Metadata", "true")
+        with urllib.request.urlopen(request, timeout=self.socket_timeout) as response:
+            metadata_scheduledevents = json.loads(response.read())
+            return ScheduledEvents(metadata_scheduledevents)
+
+    def start_an_event(self, event: ScheduledEvent) -> Any:
+        print_(f"Starting a scheduled event {event.eventid}.", eventid=event.eventid)
+        # A node redeploy can follow immediately, sleep as at the end of the program
+        time.sleep(self.delay_before_program_close_seconds)
+        data = {"StartRequests": [{"EventId": event.eventid}]}
+        data_bytes = json.dumps(data).encode("utf-8")
+        request = urllib.request.Request(self.api_metadata_scheduledevents, data=data_bytes)
+        request.add_header("Metadata", "true")
+        with urllib.request.urlopen(request, timeout=self.socket_timeout) as response:
+            return response.read()
+
+
+# Subprocess related tools, external dependencies somehow have to be running.
+class SubprocessUtils(object):
+
+    def __init__(self):
+        raise AssertionError
+
+    @staticmethod
+    def subprocess_run(cmd: List[str], event: ScheduledEvent) -> None:
+        print_(f"Running a command {cmd} for event {event.eventid}.", eventid=event.eventid)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        proc_output_reader = threading.Thread(target=SubprocessUtils._subprocess_stdout_reader,
+                                              args=(cmd, event, proc))
+        proc_output_reader.start()
+        proc.wait()
+
+    @staticmethod
+    def _subprocess_stdout_reader(cmd: List[str], event: ScheduledEvent, proc: subprocess.Popen) -> None:
+        subprocess_id = " ".join(cmd)
+        for message in proc.stdout:
+            print_(message, eventid=event.eventid, subprocess=subprocess_id)
+
+
+# Tool to perform operations with the "kubectl" tool.
+class KubectlManager(object):
+
+    def __init__(self,
+                 cache_dir: str,
+                 kubectl_drain_options: List[str],
+                 this_hostnames: ThisHostnames) -> None:
+        super().__init__()
+        self.kubectl_cordon_cache: CacheableList[ScheduledEvent] = CacheableList(cache_dir, "kubectl_cordon_cache")
+        self.kubectl_drain_options: List[str] = kubectl_drain_options
+        self.this_hostnames: ThisHostnames = this_hostnames
+
+    def kubectl_cordon(self, event: ScheduledEvent) -> None:
+        SubprocessUtils.subprocess_run(["kubectl", "cordon", self.this_hostnames.node_name], event)
+        # Cache a simplified event. We don't need all the details there.
+        self.kubectl_cordon_cache.append(ScheduledEvent({"EventId": event.eventid}))
+
+    def kubectl_drain(self, event: ScheduledEvent) -> None:
+        SubprocessUtils.subprocess_run(
+            ["kubectl", "drain", self.this_hostnames.node_name] + self.kubectl_drain_options, event)
+
+    def kubectl_uncordon(self, event: ScheduledEvent) -> None:
+        SubprocessUtils.subprocess_run(["kubectl", "uncordon", self.this_hostnames.node_name], event)
+        self.kubectl_cordon_cache.remove(event)
+
+
+# The operator is here. Everything else is unnecessary.
+class Seoperator2(object):
+
+    def __init__(self,
+                 cache_dir: str,
+                 ignored_event_types: List[str],
+                 this_hostnames: ThisHostnames,
+                 scheduled_events_manager: ScheduledEventsManager,
+                 kubectl_manager: KubectlManager) -> None:
+        super().__init__()
+        self.ignored_event_types = ignored_event_types
+        self.this_hostnames: ThisHostnames = this_hostnames
+        self.scheduled_events_manager: ScheduledEventsManager = scheduled_events_manager
+        self.kubectl_manager: KubectlManager = kubectl_manager
+        self.already_processed_events: CacheableList[str] = CacheableList(cache_dir, "already_processed_events")
+
+    def handle_scheduled_events(self, events: ScheduledEvents) -> None:
+        # uncordon nodes affected by scheduled events in the past
+        for cached_event in self.kubectl_manager.kubectl_cordon_cache:
+            if not any(cached_event.eventid == event.eventid for event in events):
+                print_(f"Found an event from the past {cached_event.eventid}.", eventid=cached_event.eventid)
+                print_(f"Handling the past event {cached_event.eventid}.", eventid=cached_event.eventid)
+                self.kubectl_manager.kubectl_uncordon(cached_event)
+                print_(f"Handled the past event {cached_event.eventid}.", eventid=cached_event.eventid)
+
+        if len(events) == 0:
+            return
+
+        print_(f"The current list of planned events includes {len(events)} events.", events=events)
+
+        events = filter(lambda event: event.eventid not in self.already_processed_events, events)
+        events = filter(lambda event: event.eventstatus == "Scheduled", events)
+        events = filter(lambda event: self.this_hostnames.compute_name in event.resources, events)
+        events = filter(lambda event: event.eventtype not in self.ignored_event_types, events)
+
+        for event in events:
+            print_(f"Found an event {event.eventid} ({event.eventtype}).", eventid=event.eventid)
+            print_(f"Handling the event {event.eventid}.", eventid=event.eventtype)
+            self.handle_scheduled_event(event)
+            print_(f"Handled the event {event.eventid}.", eventid=event.eventid)
+            self.already_processed_events.append(event.eventid)
+
+    def handle_scheduled_event(self, event: ScheduledEvent) -> None:
+        self.kubectl_manager.kubectl_cordon(event)
+        self.kubectl_manager.kubectl_drain(event)
+        self.scheduled_events_manager.start_an_event(event)
+
+
+# Manager that takes care of graceful shutdown.
+class LifeManager(object):
+
+    def __init__(self, delay_before_program_close_seconds: int) -> None:
+        super().__init__()
+        self.delay_before_program_close_seconds: int = delay_before_program_close_seconds
         self.exit_threading_event: threading.Event = threading.Event()
-
-        self.already_processed_events: CacheableList[str] = \
-            CacheableList[str](self.cache_dir, "already_processed_events")
-        self.kubectl_cordon_cache: CacheableList[str] = \
-            CacheableList[str](self.cache_dir, "kubectl_cordon_cache")
-
-    def serialize(self) -> Dict[str, Any]:
-        return {
-            "config_file_path": self.config_file_path,
-            "api_metadata_instance_url": self.api_metadata_instance_url,
-            "api_metadata_scheduledevents_url": self.api_metadata_scheduledevents_url,
-            "cache_dir": self.cache_dir,
-            "main_loop_rate": self.main_loop_rate,
-            "socket_timeout": self.socket_timeout,
-            "ignored_event_types": self.ignored_event_types,
-            "kubectl_drain_options": self.kubectl_drain_options,
-            "this_hostnames": self.this_hostnames,
-            "exit_threading_event": self.exit_threading_event.is_set(),
-            "already_processed_events": self.already_processed_events.values(),
-            "kubectl_cordon_cache": self.kubectl_cordon_cache.values()
-        }
-
-
-def read_config_file(config_file_path: str) -> Dict[str, Any]:
-    config_data = {}
-    if os.path.isfile(config_file_path):
-        with open(config_file_path) as f:
-            config_data = json.load(f)
-    return config_data
-
-
-def print_(message: str, **kwargs) -> None:
-    timestamp = datetime.datetime.utcnow().astimezone().replace(microsecond=0).isoformat()
-    print(json.dumps({"timestamp": timestamp, "message": message, **kwargs}), flush=True)
-
-
-def subprocess_stdout_reader(cmd: List[str], eventid: str, proc: subprocess.Popen) -> None:
-    subprocess_id = " ".join(cmd)
-    for message in proc.stdout:
-        print_(message, eventid=eventid, subprocess=subprocess_id)
-
-
-def subprocess_run(cmd: List[str], eventid: str) -> None:
-    print_(f"Running a command: {cmd} for {eventid}.", eventid=eventid)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    proc_output_reader = threading.Thread(target=subprocess_stdout_reader, args=(cmd, eventid, proc))
-    proc_output_reader.start()
-    proc.wait()
-
-
-def b36_encode(num: int) -> str:
-    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-    result = ""
-    while not result or num > 0:
-        num, i = divmod(num, 36)
-        result = digits[i] + result
-    return result
-
-
-# example
-#   input: aks-default-36328368-vmss_18
-#   output: aks-default-36328368-vmss00000i
-def compute_name_to_node_name(compute_name: str) -> str:
-    name_prefix, vm_index_base10 = compute_name.split("_")
-    vm_index_base36 = b36_encode(int(vm_index_base10))
-    return name_prefix + vm_index_base36.rjust(6, "0")
-
-
-def get_this_hostnames(context: Context) -> Dict[str, str]:
-    request = urllib.request.Request(context.api_metadata_instance_url)
-    request.add_header("Metadata", "true")
-    with urllib.request.urlopen(request, timeout=context.socket_timeout) as response:
-        metadata_instance = json.loads(response.read())
-        compute_name = metadata_instance.get("compute").get("name")
-        return {
-            "hostname": socket.gethostname(),
-            "computename": compute_name,
-            "nodename": compute_name_to_node_name(compute_name),
-        }
-
-
-def get_scheduled_events(context: Context) -> Dict[str, Any]:
-    request = urllib.request.Request(context.api_metadata_scheduledevents_url)
-    request.add_header("Metadata", "true")
-    with urllib.request.urlopen(request, timeout=context.socket_timeout) as response:
-        metadata_scheduledevents = json.loads(response.read())
-        return metadata_scheduledevents
-
-
-def start_scheduled_event(context: Context, eventid: str) -> Any:
-    print_(f"Starting scheduled event.", eventid=eventid)
-
-    # give some time to external monitoring to collect logs
-    if context.exit_threading_event.wait(5):
-        return
-
-    data = {"StartRequests": [{"EventId": eventid}]}
-    databytes = json.dumps(data).encode("utf-8")
-    request = urllib.request.Request(context.api_metadata_scheduledevents_url, data=databytes)
-    request.add_header("Metadata", "true")
-    with urllib.request.urlopen(request, timeout=context.socket_timeout) as response:
-        return response.read()
-
-
-def handle_scheduled_events(context: Context, scheduled_events: Dict[str, Any]) -> None:
-    events = scheduled_events["Events"]
-
-    # uncordon nodes affected by scheduled events in the past
-    if context.kubectl_cordon_cache.len() > 0:
-        for nodename in context.kubectl_cordon_cache.values():
-            event_affecting_node_found = False
-            for event in events:
-                if nodename in event["Resources"]:
-                    event_affecting_node_found = True
-                    break
-            if not event_affecting_node_found:
-                kubectl_uncordon(context, "null", nodename)
-
-    if len(events) == 0:
-        return
-
-    print_(f"Current list of planned events.", events=events)
-
-    for event in events:
-        eventid = event["EventId"]
-        eventstatus = event["EventStatus"]
-        resources = event["Resources"]
-        eventtype = event["EventType"]
-        # resourcetype = event["ResourceType"]
-        # notbefore = event["NotBefore"]
-
-        if eventid in context.already_processed_events.values():
-            continue
-
-        print_(f"A new event was found {eventid} ({eventtype}).", eventid=eventid)
-        if eventstatus == "Scheduled" \
-                and context.this_hostnames["computename"] in resources \
-                and eventtype not in context.ignored_event_types:
-            print_(f"Handling the event {eventid}.", eventid=eventid)
-            handle_scheduled_event(context, eventid)
-            print_(f"Handled the event {eventid}.", eventid=eventid)
-        else:
-            print_(f"Skipping the event {eventid}.", eventid=eventid)
-
-        context.already_processed_events.append(eventid)
-
-
-def handle_scheduled_event(context: Context, eventid: str) -> None:
-    nodename = context.this_hostnames["nodename"]
-    kubectl_cordon(context, eventid, nodename)
-    kubectl_drain(context, eventid, nodename)
-    start_scheduled_event(context, eventid)
-
-
-def kubectl_cordon(context: Context, eventid: str, nodename: str) -> None:
-    subprocess_run(["kubectl", "cordon", nodename], eventid)
-    context.kubectl_cordon_cache.append(nodename)
-
-
-def kubectl_drain(context: Context, eventid: str, nodename: str) -> None:
-    subprocess_run(["kubectl", "drain", nodename] + context.kubectl_drain_options, eventid)
-
-
-def kubectl_uncordon(context: Context, eventid: str, nodename: str) -> None:
-    subprocess_run(["kubectl", "uncordon", nodename], eventid)
-    context.kubectl_cordon_cache.remove(nodename)
-
-
-def the_end(context: Context, signal_number: Any):
-    print_(f"Interrupted by signal {signal_number}, shutting down.")
-    context.exit_threading_event.set()
-
-
-def main():
-    try:
-        print_("The operator started to work.")
 
         for some_signal in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
             signal.signal(some_signal,
                           lambda signal_number, current_stack_frame:
-                          the_end(context, signal_number))
+                          self.death_handler(signal_number))
 
-        config_file_path = sys.argv[1] if len(sys.argv) > 1 else "/just/not/exist"
-        cache_dir = sys.argv[2] if len(sys.argv) > 2 else "/just/not/exist"
+    def death_handler(self, signal_number: Any):
+        print_(f"Interrupted by signal {signal_number}, shutting down.")
+        time.sleep(self.delay_before_program_close_seconds)
+        self.exit_threading_event.set()
 
-        context = Context(config_file_path, cache_dir)
-        print_(f"The configuration is loaded.", context=context.serialize())
+
+# Configuration - what can be set with parameters to the script.
+class Config(JsonSerializable, object):
+
+    def __init__(self, config_file: str, cache_dir: str) -> None:
+        config_data = {}
+        if os.path.isfile(config_file):
+            with open(config_file) as f:
+                config_data = json.load(f)
+
+        self.config_file: str = config_file
+        self.cache_dir: str = cache_dir
+
+        self.api_metadata_instance: str = \
+            config_data.get("api-metadata-instance",
+                            "http://169.254.169.254/metadata/scheduledevents?api-version=2019-08-01")
+        self.api_metadata_scheduledevents: str = \
+            config_data.get("api-metadata-scheduledevents",
+                            "http://169.254.169.254/metadata/instance?api-version=2020-09-01")
+
+        self.main_loop_sleep_duration_seconds: int = config_data.get("main-loop-sleep-duration-seconds", 60)
+        self.socket_timeout_seconds: int = config_data.get("socket-timeout-seconds", 10)
+        self.ignored_event_types: List[str] = config_data.get("ignored-event-types", [])
+        self.kubectl_drain_options: List[str] = config_data.get("kubectl-drain-options", [])
+        self.delay_before_program_close_seconds: int = config_data.get("delay-before-program-close-seconds", 5)
+
+    def __str__(self) -> str:
+        return str(self.to_json())
+
+    def __repr__(self) -> str:
+        return (f"{self.__class__.__name__}("
+                f"{str(self.to_json())}")
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "config_file": self.config_file,
+            "cache_dir": self.cache_dir,
+            "api_metadata_instance": self.api_metadata_instance,
+            "api_metadata_scheduledevents": self.api_metadata_scheduledevents,
+            "main_loop_sleep_duration_seconds": self.main_loop_sleep_duration_seconds,
+            "socket_timeout_seconds": self.socket_timeout_seconds,
+            "ignored_event_types": self.ignored_event_types,
+            "kubectl_drain_options": self.kubectl_drain_options,
+            "delay_before_program_close_seconds": self.delay_before_program_close_seconds,
+        }
+
+
+def main():
+    try:
+        print_("The operator started working.", sysversioninfo=sys.version_info)
+
+        config_file_path = sys.argv[1] if len(sys.argv) > 1 else "/no/custom/config"
+        cache_dir = sys.argv[2] if len(sys.argv) > 2 else "/do/not/store"
+
+        config = Config(config_file_path,
+                        cache_dir)
+        this_hostnames = ThisHostnames(config.api_metadata_instance,
+                                       config.socket_timeout_seconds)
+        scheduled_events_manager = ScheduledEventsManager(config.api_metadata_scheduledevents,
+                                                          config.socket_timeout_seconds,
+                                                          config.delay_before_program_close_seconds)
+        kubectl_manager = KubectlManager(config.cache_dir,
+                                         config.kubectl_drain_options,
+                                         this_hostnames)
+        life_manager = LifeManager(config.delay_before_program_close_seconds)
+        operator = Seoperator2(config.cache_dir,
+                               config.ignored_event_types,
+                               this_hostnames,
+                               scheduled_events_manager,
+                               kubectl_manager)
+
+        print_(f"The operator has been initialized.",
+               config=config,
+               this_hostnames=this_hostnames,
+               already_processed_events=operator.already_processed_events,
+               kubectl_cordon_cache=kubectl_manager.kubectl_cordon_cache,
+               exit_threading_event_is_set=life_manager.exit_threading_event.is_set())
 
         while True:
-            print_("The program is still running.")
-            data = get_scheduled_events(context)
-            handle_scheduled_events(context, data)
-            if context.exit_threading_event.wait(context.main_loop_rate):
+            # print_("The operator is still working.")
+            data = scheduled_events_manager.query_for_events()
+            operator.handle_scheduled_events(data)
+            if life_manager.exit_threading_event.wait(config.main_loop_sleep_duration_seconds):
                 break
 
-    except Exception:
+    except BaseException as e:
         traceback_formatted = str(traceback.format_exc())
-        print_("Fatal error in the main loop.", traceback=traceback_formatted)
+        print_(f"There was a fatal error in my main loop, {e.__class__.__name__}.", traceback=traceback_formatted)
         sys.exit(1)
 
 

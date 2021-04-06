@@ -7,7 +7,7 @@ image:
   repository: seo2
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "1.0.0"
+  tag: ""
 
 imagePullSecrets: []
 nameOverride: ""
@@ -54,17 +54,19 @@ tolerations: []
 affinity: {}
 
 config:
-  api-metadata-scheduledevents-url: "http://169.254.169.254/metadata/scheduledevents?api-version=2019-08-01"
-  api-metadata-instance-url: "http://169.254.169.254/metadata/instance?api-version=2020-09-01"
-  cache-dir: "/cache"
-  main-loop-rate: 60
-  socket-timeout: 10
+  # versions of used api
+  api-metadata-scheduledevents: "http://169.254.169.254/metadata/scheduledevents?api-version=2019-08-01"
+  api-metadata-instance: "http://169.254.169.254/metadata/instance?api-version=2020-09-01"
+  # how often to query for events
+  main-loop-sleep-duration-seconds: 60
+  # timeout of network connections to api-*
+  socket-timeout-seconds: 10
+  # sometimes there is less harm if you ignore minor events
   ignored-event-types:
     - Freeze
-  #    - Reboot
-  #    - Redeploy
-  #    - Preempt
-  #    - Terminate
+  # options to be used with "kubectl drain NODE"
   kubectl-drain-options:
     - --delete-emptydir-data
     - --ignore-daemonsets
+  # give some time to external monitoring to collect logs
+  delay-before-program-close-seconds: 5

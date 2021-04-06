@@ -26,10 +26,10 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       volumes:
-        - name: {{ include "seo2.fullname" . }}
+        - name: {{ include "seo2.configMapName" . }}
           configMap:
             defaultMode: 0444
-            name: {{ include "seo2.fullname" . }}
+            name: {{ include "seo2.configMapName" . }}
         - name: cache-volume
           emptyDir: {}
       containers:
@@ -38,7 +38,9 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           command:
-            - /app/seoperator2/seoperator2
+            - /usr/bin/python3
+            - -u
+            - seoperator2.py
           args:
             - /config/config.json
             - /cache
@@ -46,7 +48,7 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
-            - name: {{ include "seo2.fullname" . }}
+            - name: {{ include "seo2.configMapName" . }}
               mountPath: /config
             - name: cache-volume
               mountPath: /cache

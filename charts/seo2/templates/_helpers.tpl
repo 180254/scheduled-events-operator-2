@@ -62,8 +62,23 @@ Create the name of the service account to use
 */}}
 {{- define "seo2.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
-{{- default (include "seo2.fullname" .) .Values.serviceAccount.name }}
+{{- default (printf "%s-%s" (include "seo2.fullname" .) "serviceaccount" | trunc 63 | trimSuffix "-") .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Create the name of the cluster role binding to use
+*/}}
+{{- define "seo2.clusterRoleBindingName" -}}
+{{- printf "%s-%s" (include "seo2.fullname" .) "clusterrolebinding" | trunc 63 | trimSuffix "-" -}}
+{{- end }}
+
+{{/*
+Create the name of the configmap to use
+*/}}
+{{- define "seo2.configMapName" -}}
+{{- printf "%s-%s" (include "seo2.fullname" .) "configmap" | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
