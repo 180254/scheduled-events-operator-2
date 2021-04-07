@@ -418,6 +418,13 @@ def main():
         config_file_path = sys.argv[1] if len(sys.argv) > 1 else "/no/custom/config"
         cache_dir = sys.argv[2] if len(sys.argv) > 2 else "/do/not/store"
 
+        # Disable automatic proxy server detection.
+        # https://docs.microsoft.com/en-us/azure/virtual-machines/linux/instance-metadata-service?tabs=linux#proxies
+        # https://docs.python.org/3.9/howto/urllib2.html#proxies
+        proxy_support = urllib.request.ProxyHandler({})
+        opener = urllib.request.build_opener(proxy_support)
+        urllib.request.install_opener(opener)
+
         config = Config(config_file_path,
                         cache_dir)
         this_hostnames = ThisHostnames(config.api_metadata_instance,
