@@ -173,7 +173,7 @@ class ScheduledEvent(JsonSerializable, object):
         self.eventsource: str = event.get("EventSource")
 
     @staticmethod
-    # # https://bugs.python.org/issue30681
+    # https://bugs.python.org/issue30681
     def _parsedate_to_datetime(value) -> datetime:
         try:
             return email.utils.parsedate_to_datetime(value)
@@ -314,7 +314,8 @@ class Seoperator2(object):
         self.already_processed_events: CacheableList[str] = CacheableList(cache_dir, "already_processed_events")
 
     def handle_scheduled_events(self, events: ScheduledEvents) -> None:
-        # uncordon nodes affected by scheduled events in the past
+        # If an event is finished, it will no longer be reported by the scheduledevents API.
+        # uncordon nodes affected by scheduled events in the past.
         for cached_event in self.kubectl_manager.kubectl_cordon_cache:
             if not any(cached_event.eventid == event.eventid for event in events):
                 print_(f"Found an event from the past {cached_event.eventid}.", eventid=cached_event.eventid)
