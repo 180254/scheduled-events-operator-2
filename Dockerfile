@@ -10,9 +10,13 @@ RUN set -eux; \
     upx kubectl || true;
 
 FROM gcr.io/distroless/python3-debian10:latest
+
 WORKDIR /app
 ENV PATH /app:$PATH
+USER nonroot
+
 COPY --from=kubectl_builder /app/* ./
 COPY seoperator2.py ./
+
 ENTRYPOINT ["/usr/bin/python3", "-u"]
 CMD ["seoperator2.py"]
