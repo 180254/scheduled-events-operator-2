@@ -69,6 +69,14 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Create the name of the cluster role to use
+*/}}
+{{- define "seo2.clusterRoleName" -}}
+{{- printf "%s-%s" (include "seo2.fullname" .) "clusterrole" | trunc 63 | trimSuffix "-" -}}
+{{- end }}
+
+
+{{/*
 Create the name of the cluster role binding to use
 */}}
 {{- define "seo2.clusterRoleBindingName" -}}
