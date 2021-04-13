@@ -29,13 +29,22 @@ class JsonSerializable(abc.ABC):
     def to_json(self) -> Any:
         pass
 
+    def __str__(self) -> str:
+        return str(self.to_json())
+
+    def __repr__(self) -> str:
+        return (f"{self.__class__.__name__}("
+                f"{repr(self.to_json())})")
+
 
 # Take a look at the documentation of JsonSerializable.
+# https://docs.python.org/3/library/json.html#json.JSONEncoder.default
 class JsonSerializableEncoder(json.JSONEncoder):
 
     def default(self, o: Any):
         if isinstance(o, JsonSerializable):
             return o.to_json()
+        # Let the base class default method raise the TypeError
         return json.JSONEncoder.default(self, o)
 
 
@@ -98,13 +107,6 @@ class CacheableList(Cacheable[T], Iterable[T], JsonSerializable, object):
     def __iter__(self) -> Iterator[T]:
         return iter(self._list)
 
-    def __str__(self) -> str:
-        return f"{self._list!s}"
-
-    def __repr__(self) -> str:
-        return (f"{self.__class__.__name__}("
-                f"{self._name!r}, {self._list!r})")
-
     def to_json(self) -> List[T]:
         return self._list
 
@@ -141,13 +143,6 @@ class ThisHostnames(JsonSerializable, object):
             result = digits[i] + result
         return result
 
-    def __str__(self) -> str:
-        return f"{self.hostname!r}, {self.compute_name!r}, {self.node_name!r})"
-
-    def __repr__(self) -> str:
-        return (f"{self.__class__.__name__}("
-                f"{self.hostname!r}, {self.compute_name!r}, {self.node_name!r})")
-
     def to_json(self) -> Dict[str, Any]:
         return {
             "hostname": self.hostname,
@@ -180,12 +175,6 @@ class ScheduledEvent(JsonSerializable, object):
         except (TypeError, ValueError):
             return None
 
-    def __str__(self) -> str:
-        return str(self._raw)
-
-    def __repr__(self) -> str:
-        return repr(self._raw)
-
     def to_json(self) -> Dict[str, Any]:
         return self._raw
 
@@ -205,12 +194,6 @@ class ScheduledEvents(Iterable[ScheduledEvent], JsonSerializable, object):
 
     def __iter__(self) -> Iterator[ScheduledEvent]:
         return iter(self.events)
-
-    def __str__(self) -> str:
-        return str(self._raw)
-
-    def __repr__(self) -> str:
-        return repr(self._raw)
 
     def to_json(self) -> Dict[str, Any]:
         return self._raw
@@ -256,19 +239,41 @@ class SubprocessUtils(object):
         raise AssertionError
 
     @staticmethod
-    def subprocess_run(cmd: List[str], event: ScheduledEvent) -> None:
-        print_(f"Running a command {cmd} for event {event.eventid}.", eventid=event.eventid)
+    def subprocess_run_async(cmd: List[str], **_print_kwargs) -> 'subprocess.Popen[str]':
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        print_(f"Running a command {cmd}.", subprocess=proc.pid, **_print_kwargs)
         proc_output_reader = threading.Thread(target=SubprocessUtils._subprocess_stdout_reader,
-                                              args=(cmd, event, proc))
+                                              args=(proc,),
+                                              kwargs=_print_kwargs)
         proc_output_reader.start()
-        proc.wait()
+        return proc
 
     @staticmethod
-    def _subprocess_stdout_reader(cmd: List[str], event: ScheduledEvent, proc: subprocess.Popen) -> None:
-        subprocess_id = " ".join(cmd)
+    def _subprocess_stdout_reader(proc: subprocess.Popen, **print_kwargs) -> None:
         for message in proc.stdout:
-            print_(message, eventid=event.eventid, subprocess=subprocess_id)
+            print_(message, subprocess=proc.pid, **print_kwargs)
+
+    @staticmethod
+    def subprocess_run_sync(cmd: List[str], **_print_kwargs) -> 'subprocess.CompletedProcess[str]':
+        print_(f"Running a command {cmd}.", subprocess=-1, **_print_kwargs)
+        return subprocess.run(cmd, text=True, capture_output=True)
+
+
+# An object-oriented representation of a "kubectl version" response.
+class KubectlVersion(JsonSerializable, object):
+
+    def __init__(self, client_version: str, server_version: str, stderr: str) -> None:
+        super().__init__()
+        self.client_version: str = client_version
+        self.server_version: str = server_version
+        self.stderr: str = stderr
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "client_version": self.client_version,
+            "server_version": self.server_version,
+            "stderr": self.stderr
+        }
 
 
 # Tool to perform operations with the "kubectl" tool.
@@ -284,17 +289,38 @@ class KubectlManager(object):
         self.this_hostnames: ThisHostnames = this_hostnames
 
     def kubectl_cordon(self, event: ScheduledEvent) -> None:
-        SubprocessUtils.subprocess_run(["kubectl", "cordon", self.this_hostnames.node_name], event)
+        proc = SubprocessUtils.subprocess_run_async(
+            ["kubectl", "cordon", self.this_hostnames.node_name],
+            eventdid=event.eventid)
+        proc.wait()
         # Cache a simplified event. We don't need all the details there.
         self.kubectl_cordon_cache.append(ScheduledEvent({"EventId": event.eventid}))
 
     def kubectl_drain(self, event: ScheduledEvent) -> None:
-        SubprocessUtils.subprocess_run(
-            ["kubectl", "drain", self.this_hostnames.node_name] + self.kubectl_drain_options, event)
+        proc = SubprocessUtils.subprocess_run_async(
+            ["kubectl", "drain", self.this_hostnames.node_name, *self.kubectl_drain_options],
+            eventdid=event.eventid)
+        proc.wait()
 
     def kubectl_uncordon(self, event: ScheduledEvent) -> None:
-        SubprocessUtils.subprocess_run(["kubectl", "uncordon", self.this_hostnames.node_name], event)
+        proc = SubprocessUtils.subprocess_run_async(
+            ["kubectl", "uncordon", self.this_hostnames.node_name],
+            eventdid=event.eventid)
+        proc.wait()
         self.kubectl_cordon_cache.remove(event)
+
+    @staticmethod
+    def kubectl_version() -> KubectlVersion:
+        kubectl_version_proc = SubprocessUtils.subprocess_run_sync(["kubectl", "version", "-o", "json"])
+        try:
+            versions = json.loads(kubectl_version_proc.stdout)
+        except json.JSONDecodeError:
+            print_("Failed to parse  'kubectl version' response.")
+            versions = {}
+        client_version = versions.get("clientVersion", {}).get("gitVersion", None)
+        server_version = versions.get("serverVersion", {}).get("gitVersion", None)
+        stderr = kubectl_version_proc.stderr.rstrip()
+        return KubectlVersion(client_version, server_version, stderr)
 
 
 # The operator is here. Everything else is unnecessary.
@@ -329,9 +355,10 @@ class Seoperator2(object):
         print_(f"The current list of planned events includes {len(events)} events.", events=events)
 
         events = filter(lambda event: event.eventid not in self.already_processed_events, events)
-        events = filter(lambda event: event.eventstatus == "Scheduled", events)
-        events = filter(lambda event: self.this_hostnames.compute_name in event.resources, events)
         events = filter(lambda event: event.eventtype not in self.ignored_event_types, events)
+        events = filter(lambda event: self.this_hostnames.compute_name in event.resources, events)
+        events = filter(lambda event: event.resourcetype == "VirtualMachine", events)
+        events = filter(lambda event: event.eventstatus == "Scheduled", events)
 
         for event in events:
             print_(f"Found an event {event.eventid} ({event.eventtype}).", eventid=event.eventid)
@@ -390,13 +417,6 @@ class Config(JsonSerializable, object):
         self.kubectl_drain_options: List[str] = config_data.get("kubectl-drain-options", [])
         self.delay_before_program_close_seconds: int = config_data.get("delay-before-program-close-seconds", 5)
 
-    def __str__(self) -> str:
-        return str(self.to_json())
-
-    def __repr__(self) -> str:
-        return (f"{self.__class__.__name__}("
-                f"{str(self.to_json())}")
-
     def to_json(self) -> Dict[str, Any]:
         return {
             "config_file": self.config_file,
@@ -413,7 +433,7 @@ class Config(JsonSerializable, object):
 
 def main():
     try:
-        print_("The operator started working.", sysversioninfo=sys.version_info)
+        print_("The operator started working.")
 
         config_file_path = sys.argv[1] if len(sys.argv) > 1 else "/no/custom/config"
         cache_dir = sys.argv[2] if len(sys.argv) > 2 else "/do/not/store"
@@ -425,6 +445,7 @@ def main():
         opener = urllib.request.build_opener(proxy_support)
         urllib.request.install_opener(opener)
 
+        # Initializing helper classes.
         config = Config(config_file_path,
                         cache_dir)
         this_hostnames = ThisHostnames(config.api_metadata_instance,
@@ -442,7 +463,15 @@ def main():
                                scheduled_events_manager,
                                kubectl_manager)
 
+        # Checking the environment.
+        app_version = datetime.datetime.fromtimestamp(os.path.getmtime(__file__)).isoformat()
+        sys_version = sys.version_info
+        kubectl_version = KubectlManager.kubectl_version()
+
         print_(f"The operator has been initialized.",
+               app_version=app_version,
+               sys_version=sys_version,
+               kubectl_version=kubectl_version,
                config=config,
                this_hostnames=this_hostnames,
                already_processed_events=operator.already_processed_events,
