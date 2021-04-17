@@ -21,7 +21,7 @@ Your cluster and application must respond correctly to a node drain operation fo
 In particular, you need a working application graceful shutdown, PodDisruptionBudget policy.
 
 The program works in a painfully simple way, has dependencies on several external programs (kubectl).
-Docker image size is under 70 MB, python and dependencies take up some disk space.
+Docker image size is under 100 MB, python and dependencies take up some disk space.
 
 ## building and running
 

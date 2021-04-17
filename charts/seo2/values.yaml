@@ -29,12 +29,14 @@ podSecurityContext: {}
 securityContext: {}
 
 resources:
-  limits:
-    cpu: 100m
-    memory: 128Mi
+  # memory usage at rest : ~13MiB
+  # memory usage when handling some event: ~35MiB
   requests:
     cpu: 100m
-    memory: 128Mi
+    memory: 52Mi
+  limits:
+    cpu: 100m
+    memory: 52Mi
 
 nodeSelector: {}
 
