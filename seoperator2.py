@@ -86,7 +86,7 @@ class Cacheable(Generic[T], object):
 
 # A list that saves the state to disk with each change.
 # The list recreates its last state in the constructor, so it is immune to container restarts.
-class CacheableList(Cacheable[T], Iterable[T], JsonSerializable, object):
+class CacheableList(Cacheable[List[T]], Iterable[T], JsonSerializable, object):
 
     def __init__(self, cache_dir: str, name: str) -> None:
         super().__init__(cache_dir)
@@ -154,6 +154,7 @@ class ThisHostnames(JsonSerializable, object):
 # An object-oriented representation of a single "scheduled event".
 # https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events#query-for-events
 class ScheduledEvent(JsonSerializable, object):
+    NOT_A_DATE = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
 
     def __init__(self, event: Dict[str, Any]) -> None:
         super().__init__()
@@ -163,17 +164,20 @@ class ScheduledEvent(JsonSerializable, object):
         self.resourcetype: str = event.get("ResourceType")
         self.resources: List[str] = event.get("Resources")
         self.eventstatus: str = event.get("EventStatus")
-        self.notbefore: datetime = self._parsedate_to_datetime(event.get("NotBefore"))
+        self.notbefore: datetime.datetime = self._parsedate_to_datetime(event.get("NotBefore"))
         self.description: str = event.get("Description")
         self.eventsource: str = event.get("EventSource")
 
     @staticmethod
     # https://bugs.python.org/issue30681
-    def _parsedate_to_datetime(value) -> datetime:
+    def _parsedate_to_datetime(value) -> datetime.datetime:
         try:
-            return email.utils.parsedate_to_datetime(value)
+            result = email.utils.parsedate_to_datetime(value)
+            if result is None:
+                raise ValueError
+            return result
         except (TypeError, ValueError):
-            return None
+            return ScheduledEvent.NOT_A_DATE
 
     def to_json(self) -> Dict[str, Any]:
         return self._raw
@@ -249,7 +253,9 @@ class SubprocessUtils(object):
         return proc
 
     @staticmethod
-    def _subprocess_stdout_reader(proc: subprocess.Popen, **print_kwargs) -> None:
+    # https://stackoverflow.com/a/18423003
+    def _subprocess_stdout_reader(proc: 'subprocess.Popen[str]', **print_kwargs) -> None:
+        # pyre-ignore[16]: https://github.com/facebook/pyre-check/issues/221
         for message in proc.stdout:
             print_(message, subprocess=proc.pid, **print_kwargs)
 
@@ -354,13 +360,14 @@ class Seoperator2(object):
 
         print_(f"The current list of planned events includes {len(events)} events.", events=events)
 
-        events = filter(lambda event: event.eventid not in self.already_processed_events, events)
-        events = filter(lambda event: event.eventtype not in self.ignored_event_types, events)
-        events = filter(lambda event: self.this_hostnames.compute_name in event.resources, events)
-        events = filter(lambda event: event.resourcetype == "VirtualMachine", events)
-        events = filter(lambda event: event.eventstatus == "Scheduled", events)
+        events2: Iterator[ScheduledEvent] = iter(events)
+        events2 = filter(lambda event: event.eventid not in self.already_processed_events, events2)
+        events2 = filter(lambda event: event.eventtype not in self.ignored_event_types, events2)
+        events2 = filter(lambda event: self.this_hostnames.compute_name in event.resources, events2)
+        events2 = filter(lambda event: event.resourcetype == "VirtualMachine", events2)
+        events2 = filter(lambda event: event.eventstatus == "Scheduled", events2)
 
-        for event in events:
+        for event in events2:
             print_(f"Found an event {event.eventid} ({event.eventtype}).", eventid=event.eventid)
             print_(f"Handling the event {event.eventid}.", eventid=event.eventtype)
             self.handle_scheduled_event(event)
@@ -464,7 +471,7 @@ def main():
                                kubectl_manager)
 
         # Checking the environment.
-        app_version = datetime.datetime.fromtimestamp(os.path.getmtime(__file__)).isoformat()
+        app_version = datetime.datetime.fromtimestamp(os.path.getmtime(__file__)).astimezone().isoformat()
         sys_version = sys.version_info
         kubectl_version = KubectlManager.kubectl_version()
 
