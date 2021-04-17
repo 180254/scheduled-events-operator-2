@@ -1,8 +1,12 @@
 .idea/
-seoperator2.spec
+__pycache__/
+*.py[cod]
+*$py.class
+*.manifest
+*.spec
 build/
 dist/
-seoperator2.build/
-seoperator2.dist/
-seoperator2.bin
+*.build/
+*.dist/
+*.bin
 mega-*
