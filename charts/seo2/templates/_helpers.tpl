@@ -89,4 +89,3 @@ Create the name of the configmap to use
 {{- define "seo2.configMapName" -}}
 {{- printf "%s-%s" (include "seo2.fullname" .) "configmap" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
-
