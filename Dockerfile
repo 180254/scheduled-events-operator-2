@@ -2,6 +2,8 @@ FROM bitnami/minideb:latest as kubectl_builder
 WORKDIR /app
 SHELL ["/bin/bash" ,"-c"]
 RUN install_packages curl ca-certificates;
+# https://kubernetes.io/docs/setup/release/version-skew-policy/#kubectl
+# Supported minor version skew between client and server is +/-1.
 ENV KUBECTL_VERSION "v1.21.0"
 RUN set -eux; \
     curl -fSLO "https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; \
