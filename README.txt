@@ -25,7 +25,7 @@ Docker image size is under 100 MB, python and dependencies take up some disk spa
 
 ## building and running
 
-You can do the deployment the standard way.
+You can do the deployment in the standard way.
 Assume that "todayisnotmonday" is your Azure Container Registry.
 The deployment for AKS+helm is as follows:
 
