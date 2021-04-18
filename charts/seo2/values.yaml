@@ -33,10 +33,10 @@ resources:
   # memory usage when handling some event: ~35MiB
   requests:
     cpu: 100m
-    memory: 52Mi
+    memory: 64Mi
   limits:
     cpu: 100m
-    memory: 52Mi
+    memory: 64Mi
 
 nodeSelector: {}
 
