@@ -9,4 +9,7 @@ dist/
 *.build/
 *.dist/
 *.bin
+.pyre/
+.pyre_configuration
+.watchmanconfig
 mega-*

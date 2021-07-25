@@ -48,7 +48,7 @@ class JsonSerializableEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, o)
 
 
-# print in a version that produces output containing json.
+# Print in a version that produces output containing json.
 def print_(message: str, **kwargs) -> None:
     timestamp = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
     print(json.dumps({"timestamp": timestamp, "message": message, **kwargs}, cls=JsonSerializableEncoder), flush=True)
@@ -56,18 +56,18 @@ def print_(message: str, **kwargs) -> None:
 
 # An interface that provides methods to "cache" (save) state.
 # The state is stored on disk, under the specified key.
-class Cacheable(Generic[T], object):
+class Cacheable(Generic[T]):
 
     def __init__(self, cache_dir: str) -> None:
         super().__init__()
-        self.cache_dir: str = cache_dir
-        self.cache_enabled: bool = os.path.isdir(cache_dir)
+        self._cache_dir: str = cache_dir
+        self._cache_enabled: bool = os.path.isdir(cache_dir)
 
     def _cache_read(self, key: str, default_value: T) -> T:
-        if not self.cache_enabled:
+        if not self._cache_enabled:
             return default_value
 
-        cache_file = os.path.join(self.cache_dir, key)
+        cache_file = os.path.join(self._cache_dir, key)
         try:
             with open(cache_file, "rb") as handle:
                 return pickle.load(handle)
@@ -75,18 +75,17 @@ class Cacheable(Generic[T], object):
             return default_value
 
     def _cache_write(self, key: str, value: T) -> None:
-        if not self.cache_enabled:
+        if not self._cache_enabled:
             pass
 
-        cache_file = os.path.join(self.cache_dir, key)
+        cache_file = os.path.join(self._cache_dir, key)
         with open(cache_file, "wb") as handle:
             pickle.dump(value, handle)
-        pass
 
 
 # A list that saves the state to disk with each change.
 # The list recreates its last state in the constructor, so it is immune to container restarts.
-class CacheableList(Cacheable[List[T]], Iterable[T], JsonSerializable, object):
+class CacheableList(Cacheable[List[T]], Iterable[T], JsonSerializable):
 
     def __init__(self, cache_dir: str, name: str) -> None:
         super().__init__(cache_dir)
@@ -114,7 +113,7 @@ class CacheableList(Cacheable[List[T]], Iterable[T], JsonSerializable, object):
 # This class has easily accessible information about the name of the VM on which this script is running.
 # The "Azure Instance Metadata Service (Linux)" is helpful.
 # https://docs.microsoft.com/en-us/azure/virtual-machines/linux/instance-metadata-service?tabs=linux
-class ThisHostnames(JsonSerializable, object):
+class ThisHostnames(JsonSerializable):
 
     def __init__(self, api_metadata_instance: str, socket_timeout_seconds: int) -> None:
         request = urllib.request.Request(api_metadata_instance)
@@ -122,7 +121,7 @@ class ThisHostnames(JsonSerializable, object):
         with urllib.request.urlopen(request, timeout=socket_timeout_seconds) as response:
             metadata_instance = json.loads(response.read())
             self.hostname = socket.gethostname()
-            self.compute_name = metadata_instance.get("compute").get("name")
+            self.compute_name = metadata_instance["compute"]["name"]
             self.node_name = self._compute_name_to_node_name(self.compute_name)
 
     # example
@@ -153,20 +152,21 @@ class ThisHostnames(JsonSerializable, object):
 
 # An object-oriented representation of a single "scheduled event".
 # https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events#query-for-events
-class ScheduledEvent(JsonSerializable, object):
+class ScheduledEvent(JsonSerializable):
     NOT_A_DATE = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
 
     def __init__(self, event: Dict[str, Any]) -> None:
         super().__init__()
         self._raw: Dict[str, Any] = event
-        self.eventid: str = event.get("EventId")
-        self.eventtype: str = event.get("EventType")
-        self.resourcetype: str = event.get("ResourceType")
-        self.resources: List[str] = event.get("Resources")
-        self.eventstatus: str = event.get("EventStatus")
-        self.notbefore: datetime.datetime = self._parsedate_to_datetime(event.get("NotBefore"))
-        self.description: str = event.get("Description")
-        self.eventsource: str = event.get("EventSource")
+        self.eventid: str = event["EventId"]
+        self.eventtype: str = event["EventType"]
+        self.resourcetype: str = event["ResourceType"]
+        self.resources: List[str] = event["Resources"]
+        self.eventstatus: str = event["EventStatus"]
+        self.notbefore: datetime.datetime = self._parsedate_to_datetime(event["NotBefore"])
+        self.description: str = event["Description"]
+        self.eventsource: str = event["EventSource"]
+        self.durationinseconds: int = event["DurationInSeconds"]
 
     @staticmethod
     # https://bugs.python.org/issue30681
@@ -185,12 +185,12 @@ class ScheduledEvent(JsonSerializable, object):
 
 # An object-oriented representation of a whole "scheduled events" response.
 # https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events#query-for-events
-class ScheduledEvents(Iterable[ScheduledEvent], JsonSerializable, object):
+class ScheduledEvents(Iterable[ScheduledEvent], JsonSerializable):
 
     def __init__(self, events: Dict[str, Any]) -> None:
         super().__init__()
         self._raw: Dict[str, Any] = events
-        self.document_incarnation: int = events.get("DocumentIncarnation")
+        self.document_incarnation: int = events["DocumentIncarnation"]
         self.events: List[ScheduledEvent] = list(map(ScheduledEvent, events.get("Events", [])))
 
     def __len__(self) -> int:
@@ -206,7 +206,7 @@ class ScheduledEvents(Iterable[ScheduledEvent], JsonSerializable, object):
 # A tool to perform operations on the "scheduled events" API.
 # https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events#query-for-events
 # https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events#start-an-event
-class ScheduledEventsManager(object):
+class ScheduledEventsManager:
 
     def __init__(self,
                  api_metadata_scheduledevents: str,
@@ -226,7 +226,8 @@ class ScheduledEventsManager(object):
 
     def start_an_event(self, event: ScheduledEvent) -> Any:
         print_(f"Starting a scheduled event {event.eventid}.", eventid=event.eventid)
-        # A node redeploy can follow immediately, sleep as at the end of the program
+        # A node redeploy can follow immediately, sleep as at the end of the program.
+        # Give some time to external monitoring to collect logs.
         time.sleep(self.delay_before_program_close_seconds)
         data = {"StartRequests": [{"EventId": event.eventid}]}
         data_bytes = json.dumps(data).encode("utf-8")
@@ -237,7 +238,7 @@ class ScheduledEventsManager(object):
 
 
 # Subprocess related tools, external dependencies somehow have to be running.
-class SubprocessUtils(object):
+class SubprocessUtils:
 
     def __init__(self):
         raise AssertionError
@@ -255,18 +256,19 @@ class SubprocessUtils(object):
     @staticmethod
     # https://stackoverflow.com/a/18423003
     def _subprocess_stdout_reader(proc: 'subprocess.Popen[str]', **print_kwargs) -> None:
-        # pyre-ignore[16]: https://github.com/facebook/pyre-check/issues/221
-        for message in proc.stdout:
-            print_(message, subprocess=proc.pid, **print_kwargs)
+        if proc.stdout is not None:
+            # pyre-ignore[16]: https://github.com/facebook/pyre-check/issues/221
+            for message in proc.stdout:
+                print_(message, subprocess=proc.pid, **print_kwargs)
 
     @staticmethod
     def subprocess_run_sync(cmd: List[str], **_print_kwargs) -> 'subprocess.CompletedProcess[str]':
         print_(f"Running a command {cmd}.", subprocess=-1, **_print_kwargs)
-        return subprocess.run(cmd, text=True, capture_output=True)
+        return subprocess.run(cmd, text=True, capture_output=True, check=False)
 
 
 # An object-oriented representation of a "kubectl version" response.
-class KubectlVersion(JsonSerializable, object):
+class KubectlVersion(JsonSerializable):
 
     def __init__(self, client_version: str, server_version: str, stderr: str) -> None:
         super().__init__()
@@ -283,7 +285,7 @@ class KubectlVersion(JsonSerializable, object):
 
 
 # Tool to perform operations with the "kubectl" tool.
-class KubectlManager(object):
+class KubectlManager:
 
     def __init__(self,
                  cache_dir: str,
@@ -297,21 +299,20 @@ class KubectlManager(object):
     def kubectl_cordon(self, event: ScheduledEvent) -> None:
         proc = SubprocessUtils.subprocess_run_async(
             ["kubectl", "cordon", self.this_hostnames.node_name],
-            eventdid=event.eventid)
+            eventid=event.eventid)
         proc.wait()
-        # Cache a simplified event. We don't need all the details there.
-        self.kubectl_cordon_cache.append(ScheduledEvent({"EventId": event.eventid}))
+        self.kubectl_cordon_cache.append(event)
 
     def kubectl_drain(self, event: ScheduledEvent) -> None:
         proc = SubprocessUtils.subprocess_run_async(
             ["kubectl", "drain", self.this_hostnames.node_name, *self.kubectl_drain_options],
-            eventdid=event.eventid)
+            eventid=event.eventid)
         proc.wait()
 
     def kubectl_uncordon(self, event: ScheduledEvent) -> None:
         proc = SubprocessUtils.subprocess_run_async(
             ["kubectl", "uncordon", self.this_hostnames.node_name],
-            eventdid=event.eventid)
+            eventid=event.eventid)
         proc.wait()
         self.kubectl_cordon_cache.remove(event)
 
@@ -329,17 +330,85 @@ class KubectlManager(object):
         return KubectlVersion(client_version, server_version, stderr)
 
 
+# An object-oriented representation of a "ignore-event-rules" config key element.
+class ConfigIgnoreEventRule(JsonSerializable):
+
+    def __init__(self, ignore_event_rule: Dict[str, Any]) -> None:
+        super().__init__()
+        self.eventtype: str = ignore_event_rule["event-type"]
+        self.condition_duration_in_seconds_less_equal_to: int = \
+            ignore_event_rule.get("conditions", {}).get("duration-in-seconds-less-equal-to", -1)
+
+    def should_ignore(self, event: ScheduledEvent):
+        return event.eventtype == type \
+               and (
+                       event.durationinseconds < 0
+                       or self.condition_duration_in_seconds_less_equal_to < 0
+                       or event.durationinseconds <= self.condition_duration_in_seconds_less_equal_to
+               )
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "eventtype": self.eventtype,
+            "condition_duration_in_seconds_less_equal_to": self.condition_duration_in_seconds_less_equal_to
+        }
+
+
+# Configuration - what can be set with parameters to the script.
+class Config(JsonSerializable):
+
+    def __init__(self, config_file: str, cache_dir: str) -> None:
+        super().__init__()
+
+        config_data = {}
+        if os.path.isfile(config_file):
+            with open(config_file) as f:
+                config_data = json.load(f)
+
+        self.config_file: str = config_file
+        self.cache_dir: str = cache_dir
+
+        self.api_metadata_instance: str = \
+            config_data.get("api-metadata-instance",
+                            "http://169.254.169.254/metadata/scheduledevents?api-version=2020-07-01")
+        self.api_metadata_scheduledevents: str = \
+            config_data.get("api-metadata-scheduledevents",
+                            "http://169.254.169.254/metadata/instance?api-version=2021-02-01")
+
+        self.polling_frequency_seconds: int = config_data.get("polling-frequency-seconds", 60)
+        self.socket_timeout_seconds: int = config_data.get("socket-timeout-seconds", 10)
+
+        self.ignore_event_rules: List[ConfigIgnoreEventRule] = \
+            list(map(ConfigIgnoreEventRule, config_data.get("ignore-event-rules", [])))
+
+        self.kubectl_drain_options: List[str] = config_data.get("kubectl-drain-options", [])
+        self.delay_before_program_close_seconds: int = config_data.get("delay-before-program-close-seconds", 5)
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "config_file": self.config_file,
+            "cache_dir": self.cache_dir,
+            "api_metadata_instance": self.api_metadata_instance,
+            "api_metadata_scheduledevents": self.api_metadata_scheduledevents,
+            "polling_frequency_seconds": self.polling_frequency_seconds,
+            "socket_timeout_seconds": self.socket_timeout_seconds,
+            "ignore_event_rules": self.ignore_event_rules,
+            "kubectl_drain_options": self.kubectl_drain_options,
+            "delay_before_program_close_seconds": self.delay_before_program_close_seconds,
+        }
+
+
 # The operator is here. Everything else is unnecessary.
-class Seoperator2(object):
+class Seoperator2:
 
     def __init__(self,
                  cache_dir: str,
-                 ignored_event_types: List[str],
+                 ignore_event_rules: List[ConfigIgnoreEventRule],
                  this_hostnames: ThisHostnames,
                  scheduled_events_manager: ScheduledEventsManager,
                  kubectl_manager: KubectlManager) -> None:
         super().__init__()
-        self.ignored_event_types = ignored_event_types
+        self.ignore_event_rules: List[ConfigIgnoreEventRule] = ignore_event_rules
         self.this_hostnames: ThisHostnames = this_hostnames
         self.scheduled_events_manager: ScheduledEventsManager = scheduled_events_manager
         self.kubectl_manager: KubectlManager = kubectl_manager
@@ -362,7 +431,11 @@ class Seoperator2(object):
 
         events2: Iterator[ScheduledEvent] = iter(events)
         events2 = filter(lambda event: event.eventid not in self.already_processed_events, events2)
-        events2 = filter(lambda event: event.eventtype not in self.ignored_event_types, events2)
+        events2 = filter(
+            lambda event: not any(
+                ignore_event_rule.should_ignore(event) for ignore_event_rule in self.ignore_event_rules),
+            events2
+        )
         events2 = filter(lambda event: self.this_hostnames.compute_name in event.resources, events2)
         events2 = filter(lambda event: event.resourcetype == "VirtualMachine", events2)
         events2 = filter(lambda event: event.eventstatus == "Scheduled", events2)
@@ -381,7 +454,7 @@ class Seoperator2(object):
 
 
 # Manager that takes care of graceful shutdown.
-class LifeManager(object):
+class LifeManager:
 
     def __init__(self, delay_before_program_close_seconds: int) -> None:
         super().__init__()
@@ -395,47 +468,9 @@ class LifeManager(object):
 
     def death_handler(self, signal_number: Any):
         print_(f"Interrupted by signal {signal_number}, shutting down.")
+        # Give some time to external monitoring to collect logs.
         time.sleep(self.delay_before_program_close_seconds)
         self.exit_threading_event.set()
-
-
-# Configuration - what can be set with parameters to the script.
-class Config(JsonSerializable, object):
-
-    def __init__(self, config_file: str, cache_dir: str) -> None:
-        config_data = {}
-        if os.path.isfile(config_file):
-            with open(config_file) as f:
-                config_data = json.load(f)
-
-        self.config_file: str = config_file
-        self.cache_dir: str = cache_dir
-
-        self.api_metadata_instance: str = \
-            config_data.get("api-metadata-instance",
-                            "http://169.254.169.254/metadata/scheduledevents?api-version=2019-08-01")
-        self.api_metadata_scheduledevents: str = \
-            config_data.get("api-metadata-scheduledevents",
-                            "http://169.254.169.254/metadata/instance?api-version=2020-09-01")
-
-        self.main_loop_sleep_duration_seconds: int = config_data.get("main-loop-sleep-duration-seconds", 60)
-        self.socket_timeout_seconds: int = config_data.get("socket-timeout-seconds", 10)
-        self.ignored_event_types: List[str] = config_data.get("ignored-event-types", [])
-        self.kubectl_drain_options: List[str] = config_data.get("kubectl-drain-options", [])
-        self.delay_before_program_close_seconds: int = config_data.get("delay-before-program-close-seconds", 5)
-
-    def to_json(self) -> Dict[str, Any]:
-        return {
-            "config_file": self.config_file,
-            "cache_dir": self.cache_dir,
-            "api_metadata_instance": self.api_metadata_instance,
-            "api_metadata_scheduledevents": self.api_metadata_scheduledevents,
-            "main_loop_sleep_duration_seconds": self.main_loop_sleep_duration_seconds,
-            "socket_timeout_seconds": self.socket_timeout_seconds,
-            "ignored_event_types": self.ignored_event_types,
-            "kubectl_drain_options": self.kubectl_drain_options,
-            "delay_before_program_close_seconds": self.delay_before_program_close_seconds,
-        }
 
 
 def main():
@@ -465,7 +500,7 @@ def main():
                                          this_hostnames)
         life_manager = LifeManager(config.delay_before_program_close_seconds)
         operator = Seoperator2(config.cache_dir,
-                               config.ignored_event_types,
+                               config.ignore_event_rules,
                                this_hostnames,
                                scheduled_events_manager,
                                kubectl_manager)
@@ -475,7 +510,7 @@ def main():
         sys_version = sys.version_info
         kubectl_version = KubectlManager.kubectl_version()
 
-        print_(f"The operator has been initialized.",
+        print_("The operator has been initialized.",
                app_version=app_version,
                sys_version=sys_version,
                kubectl_version=kubectl_version,
@@ -489,7 +524,7 @@ def main():
             # print_("The operator is still working.")
             data = scheduled_events_manager.query_for_events()
             operator.handle_scheduled_events(data)
-            if life_manager.exit_threading_event.wait(config.main_loop_sleep_duration_seconds):
+            if life_manager.exit_threading_event.wait(config.polling_frequency_seconds):
                 break
 
     except BaseException as e:

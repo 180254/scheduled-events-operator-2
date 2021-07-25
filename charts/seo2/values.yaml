@@ -51,19 +51,29 @@ tolerations:
 affinity: {}
 
 config:
-  # versions of used api
-  api-metadata-scheduledevents: "http://169.254.169.254/metadata/scheduledevents?api-version=2019-08-01"
-  api-metadata-instance: "http://169.254.169.254/metadata/instance?api-version=2020-09-01"
-  # how often to query for events
-  main-loop-sleep-duration-seconds: 60
-  # timeout of network connections to api-*
+  # Versions of used api:
+  api-metadata-scheduledevents: "http://169.254.169.254/metadata/scheduledevents?api-version=2020-07-01"
+  api-metadata-instance: "http://169.254.169.254/metadata/instance?api-version=2021-02-01"
+  # How often to query for events:
+  # https://github.com/MicrosoftDocs/azure-docs/blob/master/articles/virtual-machines/linux/scheduled-events.md#polling-frequency
+  polling-frequency-seconds: 60
+  # Timeout of network connections to api-*:
   socket-timeout-seconds: 10
-  # sometimes there is less harm if you ignore minor events
-  ignored-event-types:
-    - Freeze
-  # options to be used with "kubectl drain NODE"
+  # Sometimes there is less harm if you ignore minor events:
+  ignore-event-rules:
+    - # eventtype: <EventType>
+      # https://github.com/MicrosoftDocs/azure-docs/blob/master/articles/virtual-machines/linux/scheduled-events.md#event-properties
+      event-type: Freeze
+      # Additional conditions that must be met to ignore an event:
+      conditions:
+        # Condition: interruption last lass than "DurationInSeconds" (one of event properties).
+        # https://github.com/MicrosoftDocs/azure-docs/blob/master/articles/virtual-machines/linux/scheduled-events.md#event-properties
+        # Note: If the expected duration (DurationInSeconds) is -1, then the operator will do the work. Let's agree that "-1" is unimaginably much.
+        duration-in-seconds-less-equal-to: 10
+  # Options to be used with "kubectl drain NODE":
+  # https://kubernetes.io/docs/reference/generated/kubectl/kubectl-commands#drain
   kubectl-drain-options:
     - --delete-emptydir-data
     - --ignore-daemonsets
-  # give some time to external monitoring to collect logs
+  # The end delay, added to give some time to external monitoring to collect logs:
   delay-before-program-close-seconds: 5
