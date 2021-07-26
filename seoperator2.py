@@ -342,9 +342,8 @@ class ConfigIgnoreEventRule(JsonSerializable):
     def should_ignore(self, event: ScheduledEvent):
         return event.eventtype == type \
                and (
-                       event.durationinseconds < 0
+                       self.condition_duration_in_seconds_less_equal_to >= event.durationinseconds > 0
                        or self.condition_duration_in_seconds_less_equal_to < 0
-                       or event.durationinseconds <= self.condition_duration_in_seconds_less_equal_to
                )
 
     def to_json(self) -> Dict[str, Any]:
