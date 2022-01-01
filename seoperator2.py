@@ -1,6 +1,5 @@
 #!/usr/bin/python3 -u
 import abc
-import datetime
 import email.utils
 import json
 import os
@@ -15,6 +14,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any, TypeVar, Generic, List, Iterator, Iterable, Dict
 
 T = TypeVar("T")
@@ -50,7 +50,7 @@ class JsonSerializableEncoder(json.JSONEncoder):
 
 # Print in a version that produces output containing json.
 def print_(message: str, **kwargs) -> None:
-    timestamp = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     print(json.dumps({"timestamp": timestamp, "message": message, **kwargs}, cls=JsonSerializableEncoder), flush=True)
 
 
@@ -153,7 +153,8 @@ class ThisHostnames(JsonSerializable):
 # An object-oriented representation of a single "scheduled event".
 # https://docs.microsoft.com/en-us/azure/virtual-machines/linux/scheduled-events#query-for-events
 class ScheduledEvent(JsonSerializable):
-    NOT_A_DATE = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
+    NOT_A_DATE = datetime.fromtimestamp(0, timezone.utc)
+    NOT_A_DATE_ISO = datetime.fromtimestamp(0, timezone.utc).isoformat()
 
     def __init__(self, event: Dict[str, Any]) -> None:
         super().__init__()
@@ -163,14 +164,21 @@ class ScheduledEvent(JsonSerializable):
         self.resourcetype: str = event["ResourceType"]
         self.resources: List[str] = event["Resources"]
         self.eventstatus: str = event["EventStatus"]
-        self.notbefore: datetime.datetime = self._parsedate_to_datetime(event["NotBefore"])
+        self.notbefore: datetime = self._parsedate_to_datetime(event["NotBefore"])
         self.description: str = event["Description"]
         self.eventsource: str = event["EventSource"]
         self.durationinseconds: int = event["DurationInSeconds"]
+        self.seo2startedat: datetime = datetime.fromisoformat(event.get("Seo2StartedAt", ScheduledEvent.NOT_A_DATE_ISO))
+
+    def mark_as_started(self) -> None:
+        self.seo2startedat = datetime.now(timezone.utc)
+
+    def seconds_since_started(self) -> float:
+        return abs((datetime.now(timezone.utc) - self.seo2startedat).total_seconds())
 
     @staticmethod
     # https://bugs.python.org/issue30681
-    def _parsedate_to_datetime(value) -> datetime.datetime:
+    def _parsedate_to_datetime(value) -> datetime:
         try:
             result = email.utils.parsedate_to_datetime(value)
             if result is None:
@@ -180,7 +188,10 @@ class ScheduledEvent(JsonSerializable):
             return ScheduledEvent.NOT_A_DATE
 
     def to_json(self) -> Dict[str, Any]:
-        return self._raw
+        return {
+            **self._raw,
+            "Seo2StartedAt": self.seo2startedat.isoformat()
+        }
 
 
 # An object-oriented representation of a whole "scheduled events" response.
@@ -380,6 +391,7 @@ class Config(JsonSerializable):
             list(map(ConfigIgnoreEventRule, config_data.get("ignore-event-rules", [])))
 
         self.kubectl_drain_options: List[str] = config_data.get("kubectl-drain-options", [])
+        self.delay_before_uncordon_seconds: int = config_data.get("delay-before-uncordon-seconds", 120)
         self.delay_before_program_close_seconds: int = config_data.get("delay-before-program-close-seconds", 5)
 
     def to_json(self) -> Dict[str, Any]:
@@ -404,19 +416,22 @@ class Seoperator2:
                  ignore_event_rules: List[ConfigIgnoreEventRule],
                  this_hostnames: ThisHostnames,
                  scheduled_events_manager: ScheduledEventsManager,
-                 kubectl_manager: KubectlManager) -> None:
+                 kubectl_manager: KubectlManager,
+                 delay_before_uncordon_seconds: int) -> None:
         super().__init__()
         self.ignore_event_rules: List[ConfigIgnoreEventRule] = ignore_event_rules
         self.this_hostnames: ThisHostnames = this_hostnames
         self.scheduled_events_manager: ScheduledEventsManager = scheduled_events_manager
         self.kubectl_manager: KubectlManager = kubectl_manager
+        self.delay_before_uncordon_seconds: int = delay_before_uncordon_seconds
         self.already_processed_events: CacheableList[str] = CacheableList(cache_dir, "already_processed_events")
 
     def handle_scheduled_events(self, events: ScheduledEvents) -> None:
         # If an event is finished, it will no longer be reported by the scheduledevents API.
         # uncordon nodes affected by scheduled events in the past.
         for cached_event in self.kubectl_manager.kubectl_cordon_cache:
-            if not any(cached_event.eventid == event.eventid for event in events):
+            if not any(cached_event.eventid == event.eventid for event in events) \
+                    and cached_event.seconds_since_started() > self.delay_before_uncordon_seconds:
                 print_(f"Found an event from the past {cached_event.eventid}.", eventid=cached_event.eventid)
                 print_(f"Handling the past event {cached_event.eventid}.", eventid=cached_event.eventid)
                 self.kubectl_manager.kubectl_uncordon(cached_event)
@@ -517,10 +532,11 @@ def main():
                                config.ignore_event_rules,
                                this_hostnames,
                                scheduled_events_manager,
-                               kubectl_manager)
+                               kubectl_manager,
+                               config.delay_before_uncordon_seconds)
 
         # Checking the environment.
-        app_version = datetime.datetime.fromtimestamp(os.path.getmtime(__file__)).astimezone().isoformat()
+        app_version = datetime.fromtimestamp(os.path.getmtime(__file__)).astimezone().isoformat()
         sys_version = sys.version_info
         kubectl_version = KubectlManager.kubectl_version()
 

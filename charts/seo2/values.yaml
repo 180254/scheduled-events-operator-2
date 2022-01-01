@@ -75,5 +75,8 @@ config:
   kubectl-drain-options:
     - --delete-emptydir-data
     - --ignore-daemonsets
+  # According to the documentation when an event is no longer reported it means it is completed.
+  # An extra delay before marking node as operational, just in case.
+  delay-before-uncordon-seconds: 60
   # The end delay, added to give some time to external monitoring to collect logs:
   delay-before-program-close-seconds: 5
