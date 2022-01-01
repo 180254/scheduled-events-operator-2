@@ -361,7 +361,7 @@ class Config(JsonSerializable):
 
         config_data = {}
         if os.path.isfile(config_file):
-            with open(config_file) as f:
+            with open(config_file, encoding='utf-8') as f:
                 config_data = json.load(f)
 
         self.config_file: str = config_file
