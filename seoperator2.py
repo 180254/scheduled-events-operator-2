@@ -225,7 +225,6 @@ class ScheduledEventsManager:
             return ScheduledEvents(metadata_scheduledevents)
 
     def start_an_event(self, event: ScheduledEvent) -> Any:
-        print_(f"Starting a scheduled event {event.eventid}.", eventid=event.eventid)
         # A node redeploy can follow immediately, sleep as at the end of the program.
         # Give some time to external monitoring to collect logs.
         time.sleep(self.delay_before_program_close_seconds)
@@ -449,7 +448,23 @@ class Seoperator2:
     def handle_scheduled_event(self, event: ScheduledEvent) -> None:
         self.kubectl_manager.kubectl_cordon(event)
         self.kubectl_manager.kubectl_drain(event)
-        self.scheduled_events_manager.start_an_event(event)
+
+        if len(event.resources) > 1:
+            # The event confirmation applies to all resources in the event,
+            # it is not possible to start the event for one machine.
+            # As we do not want to start the event prematurely, we are not starting the event at all.
+
+            # We could also choose the leader and (on that node) do handling for each resource separately,
+            # but then we will increase the processing time and/or memory usage (both of them are in short supply).
+
+            # Azure will start the event when the time to handle it has passed.
+            # Azure will then delete the node when it notices that it is not being used.
+            print_(f"Not starting the scheduled event {event.eventid},"
+                   f"the event affects multiple nodes.", eventid=event.eventid)
+            self.kubectl_manager.kubectl_cordon_cache.remove(event)
+        else:
+            print_(f"Starting the scheduled event {event.eventid}.", eventid=event.eventid)
+            self.scheduled_events_manager.start_an_event(event)
 
 
 # Manager that takes care of graceful shutdown.
