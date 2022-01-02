@@ -121,6 +121,8 @@ class ThisHostnames(JsonSerializable):
         request = urllib.request.Request(api_metadata_instance)
         request.add_header("Metadata", "true")
         with urllib.request.urlopen(request, timeout=socket_timeout_seconds) as response:
+            if response.status // 100 != 2:
+                raise ValueError("Instance metadata API responded with code {response.status}.")
             metadata_instance = json.loads(response.read())
             self.hostname: str = socket.gethostname()
             self.compute_name: str = metadata_instance["compute"]["name"]
@@ -234,10 +236,12 @@ class ScheduledEventsManager:
         request = urllib.request.Request(self.api_metadata_scheduledevents)
         request.add_header("Metadata", "true")
         with urllib.request.urlopen(request, timeout=self.socket_timeout) as response:
+            if response.status // 100 != 2:
+                raise ValueError("ScheduledEvents API responded with code {response.status}.")
             metadata_scheduledevents = json.loads(response.read())
             return ScheduledEvents(metadata_scheduledevents)
 
-    def start_an_event(self, event: ScheduledEvent) -> Any:
+    def start_an_event(self, event: ScheduledEvent) -> str:
         # A node redeploy can follow immediately, sleep as at the end of the program.
         # Give some time to external monitoring to collect logs.
         time.sleep(self.delay_before_program_close_seconds)
@@ -246,7 +250,9 @@ class ScheduledEventsManager:
         request = urllib.request.Request(self.api_metadata_scheduledevents, data=data_bytes)
         request.add_header("Metadata", "true")
         with urllib.request.urlopen(request, timeout=self.socket_timeout) as response:
-            return response.read()
+            if response.status // 100 != 2:
+                raise ValueError("ScheduledEvents API responded with code {response.status}.")
+            return response.read().decode('utf-8', 'ignore')
 
 
 # Subprocess related tools, external dependencies somehow have to be running.
@@ -525,7 +531,8 @@ class Seoperator2:
             self.kubectl_manager.kubectl_cordon_cache.remove(event)
         else:
             print_(f"Starting the scheduled event {event.eventid}.", eventid=event.eventid)
-            self.scheduled_events_manager.start_an_event(event)
+            response = self.scheduled_events_manager.start_an_event(event)
+            print_(f"Started the scheduled event {event.eventid}, response='{response}'.", eventid=event.eventid)
 
 
 # Manager that takes care of graceful shutdown.
