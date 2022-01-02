@@ -9,7 +9,7 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
 
-imagePullSecrets: []
+imagePullSecrets: [ ]
 nameOverride: ""
 fullnameOverride: ""
 
@@ -17,16 +17,16 @@ serviceAccount:
   # Specifies whether a service account should be created
   create: true
   # Annotations to add to the service account
-  annotations: {}
+  annotations: { }
   # The name of the service account to use.
   # If not set and create is true, a name is generated using the fullname template
   name: ""
 
-podAnnotations: {}
+podAnnotations: { }
 
-podSecurityContext: {}
+podSecurityContext: { }
 
-securityContext: {}
+securityContext: { }
 
 resources:
   # memory usage at rest : ~13MiB
@@ -38,7 +38,7 @@ resources:
     cpu: 100m
     memory: 64Mi
 
-nodeSelector: {}
+nodeSelector: { }
 
 tolerations:
   - effect: NoExecute
@@ -48,7 +48,7 @@ tolerations:
   - key: CriticalAddonsOnly
     operator: Exists
 
-affinity: {}
+affinity: { }
 
 config:
   # Versions of used api:
@@ -59,17 +59,62 @@ config:
   polling-frequency-seconds: 60
   # Timeout of network connections to api-*:
   socket-timeout-seconds: 10
-  # Sometimes there is less harm if you ignore minor events:
-  ignore-event-rules:
-    - # eventtype: <EventType>
+
+  # Sometimes there is less harm if you ignore minor events.
+  # These rules allow you to indicate whether an event should be handled or ignored by the operator.
+  # The order of rules matters:
+  # - the first rule that is satisfied concludes whether the event should be handled/ignored by the operator
+  # - if no rule is met, then the event will be handled by the operator.
+  processing-rules:
+    - # Supported processing rule type: handle-event-if, ignore-event-if.
+      # This field is required.
+      # rule-type:
+
+      # event-type-is: []
+      # Condition: event is any of given types.
       # https://github.com/MicrosoftDocs/azure-docs/blob/master/articles/virtual-machines/linux/scheduled-events.md#event-properties
-      event-type: Freeze
-      # Additional conditions that must be met to ignore an event:
-      conditions:
-        # Condition: interruption last lass than "DurationInSeconds" (one of event properties).
-        # https://github.com/MicrosoftDocs/azure-docs/blob/master/articles/virtual-machines/linux/scheduled-events.md#event-properties
-        # Note: If the expected duration (DurationInSeconds) is -1, then the operator will do the work. Let's agree that "-1" is unimaginably much.
-        duration-in-seconds-less-equal-to: 10
+      # The correct condition array values are "Reboot", "Redeploy", "Freeze", "Preempt", "Terminate".
+      # This field is required.
+
+      # Condition: the interruption caused by the event last less than "DurationInSeconds" (one of event properties).
+      # https://github.com/MicrosoftDocs/azure-docs/blob/master/articles/virtual-machines/linux/scheduled-events.md#event-properties
+      # The correct condition values are positive numbers.
+      # Note: Let's agree that DurationInSeconds=-1 is unimaginably much.
+      # If the expected duration (DurationInSeconds) is -1, then the condition is believed to be false.
+      # and-duration-in-seconds-less-equal-to:
+
+      # Condition: the interruption caused by the event last more than "DurationInSeconds" (one of event properties).
+      # https://github.com/MicrosoftDocs/azure-docs/blob/master/articles/virtual-machines/linux/scheduled-events.md#event-properties
+      # The correct condition values are positive numbers.
+      # Let's agree that DurationInSeconds=-1 is unimaginably much.
+      # If the expected duration (DurationInSeconds) is -1, then the condition is believed to be true.
+      # and-duration-in-seconds-greater-equal-to:
+
+      # Condition: the name of affected resource matches given value.
+      # This refers to the resource name as it appears in the details of the AKS's internal scaleset.
+      # Condition value may contain wildcard characters (https://docs.python.org/3/library/fnmatch.html).
+      # and-compute-name-matches:
+
+      # Condition: the name of affected resource NOT matches given value.
+      # This refers to the resource name as it appears in the details of the AKS's internal scaleset.
+      # Condition value may contain wildcard characters (https://docs.python.org/3/library/fnmatch.html).
+      # and-compute-name-not-matches:
+
+      # Condition: the name of affected AKS node matches given value.
+      # This refers to the AKS node name as it appears in the "kubectl get node" list.
+      # Condition value may contain wildcard characters (https://docs.python.org/3/library/fnmatch.html).
+      # and-node-name-matches:
+
+      # Condition: the name of affected AKS node NOT matches given value.
+      # This refers to the AKS node name as it appears in the "kubectl get node" list.
+      # Condition value may contain wildcard characters (https://docs.python.org/3/library/fnmatch.html).
+      # and-node-name-not-matches:
+
+      # Ignore freeze events that will affect for less than 10s.
+      rule-type: ignore-event-if
+      event-type-is: [ "Freeze" ]
+      and-duration-in-seconds-less-equal-to: 10
+
   # Options to be used with "kubectl drain NODE":
   # https://kubernetes.io/docs/reference/generated/kubectl/kubectl-commands#drain
   kubectl-drain-options:

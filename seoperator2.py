@@ -15,7 +15,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, TypeVar, Generic, List, Iterator, Iterable, Dict
+from fnmatch import fnmatch
+from typing import Any, TypeVar, Generic, List, Iterator, Iterable, Dict, Optional
 
 T = TypeVar("T")
 
@@ -116,13 +117,14 @@ class CacheableList(Cacheable[List[T]], Iterable[T], JsonSerializable):
 class ThisHostnames(JsonSerializable):
 
     def __init__(self, api_metadata_instance: str, socket_timeout_seconds: int) -> None:
+        super().__init__()
         request = urllib.request.Request(api_metadata_instance)
         request.add_header("Metadata", "true")
         with urllib.request.urlopen(request, timeout=socket_timeout_seconds) as response:
             metadata_instance = json.loads(response.read())
-            self.hostname = socket.gethostname()
-            self.compute_name = metadata_instance["compute"]["name"]
-            self.node_name = self._compute_name_to_node_name(self.compute_name)
+            self.hostname: str = socket.gethostname()
+            self.compute_name: str = metadata_instance["compute"]["name"]
+            self.node_name: str = self._compute_name_to_node_name(self.compute_name)
 
     # example
     #   input: aks-default-36328368-vmss_18
@@ -340,27 +342,75 @@ class KubectlManager:
         return KubectlVersion(client_version, server_version, stderr)
 
 
-# An object-oriented representation of a "ignore-event-rules" config key element.
-class ConfigIgnoreEventRule(JsonSerializable):
+# An object-oriented representation of a "processing-rules" config key element.
+class ProcessingRule(JsonSerializable):
 
-    def __init__(self, ignore_event_rule: Dict[str, Any]) -> None:
+    def __init__(self, rule: Dict[str, Any]) -> None:
         super().__init__()
-        self.eventtype: str = ignore_event_rule["event-type"]
-        self.condition_duration_in_seconds_less_equal_to: int = \
-            ignore_event_rule.get("conditions", {}).get("duration-in-seconds-less-equal-to", -1)
-
-    def should_ignore(self, event: ScheduledEvent):
-        return event.eventtype == type \
-               and (
-                       self.condition_duration_in_seconds_less_equal_to >= event.durationinseconds > 0
-                       or self.condition_duration_in_seconds_less_equal_to < 0
-               )
+        self.rule_type: str = rule["rule-type"]
+        self.event_type_is: List[str] = rule["event-type-is"]
+        self.and_duration_in_seconds_less_equal_to: Optional[int] = rule.get("and-duration-in-seconds-less-equal-to")
+        self.and_duration_in_seconds_greater_equal_to: Optional[int] = \
+            rule.get("and-duration-in-seconds-greater-equal-to")
+        self.and_compute_name_matches: Optional[str] = rule.get("and-compute-name-matches")
+        self.and_compute_name_not_matches: Optional[str] = rule.get("and-compute-name-not-matches")
+        self.and_node_name_matches: Optional[str] = rule.get("and-node-name-matches")
+        self.and_node_name_not_matches: Optional[str] = rule.get("and-node-name-not-matches")
 
     def to_json(self) -> Dict[str, Any]:
         return {
-            "eventtype": self.eventtype,
-            "condition_duration_in_seconds_less_equal_to": self.condition_duration_in_seconds_less_equal_to
+            "rule_type": self.rule_type,
+            "event_type_is": self.event_type_is,
+            "and_duration_in_seconds_less_equal_to": self.and_duration_in_seconds_less_equal_to,
+            "and_duration_in_seconds_greater_equal_to": self.and_duration_in_seconds_greater_equal_to,
+            "and_compute_name_matches": self.and_compute_name_matches,
+            "and_compute_name_not_matches": self.and_compute_name_not_matches,
+            "and_node_name_matches": self.and_node_name_matches,
+            "and_node_name_not_matches": self.and_node_name_not_matches,
         }
+
+
+# A tool that looks at all the rules in List[ProcessingRule]
+# and gives a final answer as to whether the event should be handled.
+class ProcessingRuleProcessor:
+
+    def __init__(self,
+                 processing_rules: List[ProcessingRule],
+                 this_hostnames: ThisHostnames) -> None:
+        super().__init__()
+        self.processing_rules: List[ProcessingRule] = processing_rules
+        self.this_hostnames: ThisHostnames = this_hostnames
+
+    def all_considered_should_handle(self, event: ScheduledEvent) -> bool:
+        for processing_rule in self.processing_rules:
+            if self._handle_event_if(processing_rule, event):
+                return True
+            if self._ignore_event_if(processing_rule, event):
+                return False
+        return True
+
+    def _handle_event_if(self, processing_rule: ProcessingRule, event: ScheduledEvent) -> bool:
+        return processing_rule.rule_type == "handle-event-if" and self._process_event_if(processing_rule, event)
+
+    def _ignore_event_if(self, processing_rule: ProcessingRule, event: ScheduledEvent) -> bool:
+        return processing_rule.rule_type == "ignore-event-if" and self._process_event_if(processing_rule, event)
+
+    def _process_event_if(self, processing_rule: ProcessingRule, event: ScheduledEvent) -> bool:
+        res = event.eventtype in processing_rule.event_type_is
+        res &= (processing_rule.and_duration_in_seconds_less_equal_to is None
+                or processing_rule.and_duration_in_seconds_less_equal_to >= event.durationinseconds > 0)
+        res &= (processing_rule.and_duration_in_seconds_greater_equal_to is None
+                or event.durationinseconds >= processing_rule.and_duration_in_seconds_greater_equal_to
+                or event.durationinseconds < 0)
+        res &= (processing_rule.and_compute_name_matches is None
+                or fnmatch(self.this_hostnames.compute_name, processing_rule.and_compute_name_matches))
+        res &= (processing_rule.and_compute_name_not_matches is None
+                or not fnmatch(self.this_hostnames.compute_name, processing_rule.and_compute_name_not_matches))
+        res &= (processing_rule.and_node_name_matches is None
+                or fnmatch(self.this_hostnames.node_name, processing_rule.and_node_name_matches))
+        res &= (processing_rule.and_node_name_not_matches is None
+                or not fnmatch(self.this_hostnames.node_name, processing_rule.and_node_name_not_matches))
+        return res
 
 
 # Configuration - what can be set with parameters to the script.
@@ -387,8 +437,8 @@ class Config(JsonSerializable):
         self.polling_frequency_seconds: int = config_data.get("polling-frequency-seconds", 60)
         self.socket_timeout_seconds: int = config_data.get("socket-timeout-seconds", 10)
 
-        self.ignore_event_rules: List[ConfigIgnoreEventRule] = \
-            list(map(ConfigIgnoreEventRule, config_data.get("ignore-event-rules", [])))
+        self.processing_rules: List[ProcessingRule] = \
+            list(map(ProcessingRule, config_data.get("processing-rules", [])))
 
         self.kubectl_drain_options: List[str] = config_data.get("kubectl-drain-options", [])
         self.delay_before_uncordon_seconds: int = config_data.get("delay-before-uncordon-seconds", 120)
@@ -402,7 +452,7 @@ class Config(JsonSerializable):
             "api_metadata_scheduledevents": self.api_metadata_scheduledevents,
             "polling_frequency_seconds": self.polling_frequency_seconds,
             "socket_timeout_seconds": self.socket_timeout_seconds,
-            "ignore_event_rules": self.ignore_event_rules,
+            "processing_rules": self.processing_rules,
             "kubectl_drain_options": self.kubectl_drain_options,
             "delay_before_program_close_seconds": self.delay_before_program_close_seconds,
         }
@@ -413,13 +463,13 @@ class Seoperator2:
 
     def __init__(self,
                  cache_dir: str,
-                 ignore_event_rules: List[ConfigIgnoreEventRule],
+                 processing_rules_processor: ProcessingRuleProcessor,
                  this_hostnames: ThisHostnames,
                  scheduled_events_manager: ScheduledEventsManager,
                  kubectl_manager: KubectlManager,
                  delay_before_uncordon_seconds: int) -> None:
         super().__init__()
-        self.ignore_event_rules: List[ConfigIgnoreEventRule] = ignore_event_rules
+        self.processing_rules_processor: ProcessingRuleProcessor = processing_rules_processor
         self.this_hostnames: ThisHostnames = this_hostnames
         self.scheduled_events_manager: ScheduledEventsManager = scheduled_events_manager
         self.kubectl_manager: KubectlManager = kubectl_manager
@@ -444,14 +494,10 @@ class Seoperator2:
 
         events2: Iterator[ScheduledEvent] = iter(events)
         events2 = filter(lambda event: event.eventid not in self.already_processed_events, events2)
-        events2 = filter(
-            lambda event: not any(
-                ignore_event_rule.should_ignore(event) for ignore_event_rule in self.ignore_event_rules),
-            events2
-        )
         events2 = filter(lambda event: self.this_hostnames.compute_name in event.resources, events2)
         events2 = filter(lambda event: event.resourcetype == "VirtualMachine", events2)
         events2 = filter(lambda event: event.eventstatus == "Scheduled", events2)
+        events2 = filter(self.processing_rules_processor.all_considered_should_handle, events2)
 
         for event in events2:
             print_(f"Found an event {event.eventid} ({event.eventtype}).", eventid=event.eventid)
@@ -527,9 +573,11 @@ def main():
         kubectl_manager = KubectlManager(config.cache_dir,
                                          config.kubectl_drain_options,
                                          this_hostnames)
+        processing_rules_processor = ProcessingRuleProcessor(config.processing_rules,
+                                                             this_hostnames)
         life_manager = LifeManager(config.delay_before_program_close_seconds)
         operator = Seoperator2(config.cache_dir,
-                               config.ignore_event_rules,
+                               processing_rules_processor,
                                this_hostnames,
                                scheduled_events_manager,
                                kubectl_manager,

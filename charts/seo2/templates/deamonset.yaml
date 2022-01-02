@@ -31,7 +31,7 @@ spec:
             defaultMode: 0444
             name: {{ include "seo2.configMapName" . }}
         - name: cache-volume
-          emptyDir: {}
+          emptyDir: { }
       containers:
         - name: {{ .Chart.Name }}
           securityContext:
