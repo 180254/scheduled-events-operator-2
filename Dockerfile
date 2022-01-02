@@ -12,7 +12,7 @@ RUN set -Eeuxo pipefail; \
     echo "$(<kubectl.sha256) kubectl" | sha256sum --check; \
     chmod +x kubectl;
 
-FROM gcr.io/distroless/python3-debian10:latest
+FROM gcr.io/distroless/python3-debian11:latest
 WORKDIR /app
 ENV PATH /app:$PATH
 USER nonroot
