@@ -2,6 +2,8 @@
 import abc
 import collections
 import email.utils
+import functools
+import inspect
 import json
 import os
 import pickle
@@ -17,9 +19,67 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from fnmatch import fnmatch
-from typing import Any, TypeVar, Generic, List, Iterator, Iterable, Dict, Optional
+from typing import Any, Dict, Generic, Iterable, Iterator, List, Optional, Tuple, Type, TypeVar
 
 T = TypeVar("T")
+
+
+# A simple decorator that can be used to wrap a function so that it is retried with a backoff strategy.
+def retry(
+        exceptions: Optional[Tuple[Type[BaseException], ...]] = None,
+        delays: Optional[List[float]] = None):
+    # Repeat http connection and data processing errors by default.
+    if exceptions is None:
+        exceptions = (urllib.error.URLError, urllib.error.HTTPError, ValueError)
+    # The default backoff strategy.
+    if delays is None:
+        delays = [0.5, 1, 1, 3, 5]
+
+    def retry_decorator(f):
+        @functools.wraps(f)
+        def true_retry_decorator(*args, **kwargs):
+            i = 0
+            while True:
+                try:
+                    return f(*args, **kwargs)
+                except exceptions as e:
+                    # Set eventid in log. That customization is a bit hacky, but it's simple and enough.
+                    print_kwargs = {}
+                    for idx, val in enumerate(inspect.getfullargspec(f).args):
+                        if val == "event":
+                            event = args[idx]
+                            if hasattr(event, 'eventid'):
+                                print_kwargs["eventid"] = event.eventid
+                            break
+
+                    func_name = f.__qualname__
+                    exception_name = e.__class__.__qualname__
+
+                    if i >= len(delays):
+                        print_(f"Function {func_name} failed due to {exception_name}. "
+                               f"Mo more retries, it was the last attempt.",
+                               **print_kwargs)
+                        raise e
+
+                    delay = delays[i]
+                    print_(f"Function {func_name} failed due to {exception_name}. "
+                           f"Retrying in {delay}s",
+                           **print_kwargs)
+                    # Todo: instead of time.sleep, use exit_threading_event from LifeManager.
+                    #       Is it possible to do this without singleton/global variable/etc?
+                    #       Which is the ok solution?
+                    # if life_manager.exit_threading_event.wait(delay):
+                    #     print_(f"Function {func_name} failed due to {exception_name}. "
+                    #            "Retry cancelled due to ongoing graceful shutdown.",
+                    #            **print_kwargs)
+                    #     raise e
+                    time.sleep(delay)
+
+                    i += 1
+
+        return true_retry_decorator
+
+    return retry_decorator
 
 
 # Serialize arbitrary Python objects to JSON.
@@ -117,6 +177,7 @@ class CacheableList(Cacheable[List[T]], Iterable[T], JsonSerializable):
 # https://docs.microsoft.com/en-us/azure/virtual-machines/linux/instance-metadata-service?tabs=linux
 class ThisHostnames(JsonSerializable):
 
+    @retry()
     def __init__(self, api_metadata_instance: str, socket_timeout_seconds: int) -> None:
         super().__init__()
         request = urllib.request.Request(api_metadata_instance)
@@ -233,6 +294,7 @@ class ScheduledEventsManager:
         self.socket_timeout: int = socket_timeout_seconds
         self.delay_before_program_close_seconds: int = delay_before_program_close_seconds
 
+    @retry()
     def query_for_events(self) -> ScheduledEvents:
         request = urllib.request.Request(self.api_metadata_scheduledevents)
         request.add_header("Metadata", "true")
@@ -242,6 +304,7 @@ class ScheduledEventsManager:
             metadata_scheduledevents = json.loads(response.read())
             return ScheduledEvents(metadata_scheduledevents)
 
+    @retry()
     def start_an_event(self, event: ScheduledEvent) -> str:
         # A node redeploy can follow immediately, sleep as at the end of the program.
         # Give some time to external monitoring to collect logs.
