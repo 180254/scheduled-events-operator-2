@@ -1,5 +1,6 @@
 #!/usr/bin/python3 -u
 import abc
+import collections
 import email.utils
 import json
 import os
@@ -548,17 +549,23 @@ class LifeManager:
         super().__init__()
         self.delay_before_program_close_seconds: int = delay_before_program_close_seconds
         self.exit_threading_event: threading.Event = threading.Event()
+        self.signal_counters: Dict[str, int] = collections.defaultdict(int)
 
         for some_signal in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
-            signal.signal(some_signal,
-                          lambda signal_number, current_stack_frame:
-                          self.death_handler(signal_number))
+            signal.signal(some_signal, self.signals_handler)
 
-    def death_handler(self, signal_number: Any):
-        print_(f"Interrupted by signal {signal_number}, shutting down.")
-        # Give some time to external monitoring to collect logs.
-        time.sleep(self.delay_before_program_close_seconds)
-        self.exit_threading_event.set()
+    def signals_handler(self, signal_number: int, current_stack_frame: Any):
+        signal_name = signal.Signals(signal_number).name
+
+        self.signal_counters[signal_name] += 1
+        if self.signal_counters[signal_name] == 1:
+            print_(f"Program has been interrupted by the {signal_name}, graceful shutdown in progress.")
+            # Give some time to external monitoring to collect logs.
+            time.sleep(self.delay_before_program_close_seconds)
+            self.exit_threading_event.set()
+        else:
+            print_(f"Program has been interrupted by the {signal_name} again, forced shutdown in progress.")
+            sys.exit(-1)
 
 
 def main():
@@ -578,6 +585,7 @@ def main():
         # Initializing helper classes.
         config = Config(config_file_path,
                         cache_dir)
+        life_manager = LifeManager(config.delay_before_program_close_seconds)
         this_hostnames = ThisHostnames(config.api_metadata_instance,
                                        config.socket_timeout_seconds)
         scheduled_events_manager = ScheduledEventsManager(config.api_metadata_scheduledevents,
@@ -588,7 +596,6 @@ def main():
                                          this_hostnames)
         processing_rules_processor = ProcessingRuleProcessor(config.processing_rules,
                                                              this_hostnames)
-        life_manager = LifeManager(config.delay_before_program_close_seconds)
         operator = Seoperator2(config.cache_dir,
                                processing_rules_processor,
                                this_hostnames,
