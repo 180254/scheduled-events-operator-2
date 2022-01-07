@@ -12,4 +12,5 @@ dist/
 .pyre/
 .pyre_configuration
 .watchmanconfig
+.mypy_cache
 mega-*
