@@ -346,7 +346,7 @@ class SubprocessUtils:
     @staticmethod
     def subprocess_run_sync(cmd: List[str], **_print_kwargs) -> 'subprocess.CompletedProcess[str]':
         print_(f"Running a command {cmd}.", subprocess=-1, **_print_kwargs)
-        return subprocess.run(cmd, text=True, capture_output=True, check=True)
+        return subprocess.run(cmd, text=True, capture_output=True, check=False)
 
 
 # An object-oriented representation of a "kubectl version" response.
@@ -378,6 +378,7 @@ class KubectlManager:
         self.kubectl_drain_options: List[str] = kubectl_drain_options
         self.this_hostnames: ThisHostnames = this_hostnames
 
+    @retry((subprocess.SubprocessError, ValueError))
     def kubectl_cordon(self, event: ScheduledEvent) -> None:
         proc = SubprocessUtils.subprocess_run_async(
             ["kubectl", "cordon", self.this_hostnames.node_name],
@@ -387,6 +388,7 @@ class KubectlManager:
             raise ValueError("kubectl cordon operation failed with code {exit_code}.")
         self.kubectl_cordon_cache.append(event)
 
+    @retry((subprocess.SubprocessError, ValueError))
     def kubectl_drain(self, event: ScheduledEvent) -> None:
         proc = SubprocessUtils.subprocess_run_async(
             ["kubectl", "drain", self.this_hostnames.node_name, *self.kubectl_drain_options],
@@ -395,6 +397,7 @@ class KubectlManager:
         if exit_code != 0:
             raise ValueError("kubectl drain operation failed with code {exit_code}.")
 
+    @retry((subprocess.SubprocessError, ValueError))
     def kubectl_uncordon(self, event: ScheduledEvent) -> None:
         proc = SubprocessUtils.subprocess_run_async(
             ["kubectl", "uncordon", self.this_hostnames.node_name],
@@ -405,8 +408,13 @@ class KubectlManager:
         self.kubectl_cordon_cache.remove(event)
 
     @staticmethod
+    @retry((subprocess.SubprocessError, ValueError))
     def kubectl_version() -> KubectlVersion:
         kubectl_version_proc = SubprocessUtils.subprocess_run_sync(["kubectl", "version", "-o", "json"])
+        if kubectl_version_proc.returncode != 0:
+            exit_code = kubectl_version_proc.returncode
+            stderr = kubectl_version_proc.stderr
+            raise ValueError(f"kubectl version operation failed with code {exit_code}, stderr='{stderr}'.")
         try:
             versions = json.loads(kubectl_version_proc.stdout)
         except json.JSONDecodeError:

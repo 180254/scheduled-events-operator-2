@@ -30,6 +30,6 @@ Assume that "todayisnotmonday" is your Azure Container Registry.
 The deployment for AKS+helm is as follows:
 
 $ ./build.sh --no-cache
-$ docker tag seo2:3.0.0 todayisnotmonday.azurecr.io/seo2:3.0.0
-$ docker push todayisnotmonday.azurecr.io/seo2:3.0.0
+$ docker tag seo2:3.0.1 todayisnotmonday.azurecr.io/seo2:3.0.1
+$ docker push todayisnotmonday.azurecr.io/seo2:3.0.1
 $ helm install seo2 charts/seo2 --set namespace=seo2,namespaceCreate=true --set image.repository=todayisnotmonday.azurecr.io/seo2
