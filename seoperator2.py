@@ -313,6 +313,7 @@ class ScheduledEventsManager:
         data_bytes = json.dumps(data).encode("utf-8")
         request = urllib.request.Request(self.api_metadata_scheduledevents, data=data_bytes)
         request.add_header("Metadata", "true")
+        request.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(request, timeout=self.socket_timeout) as response:
             if response.status // 100 != 2:
                 raise ValueError("ScheduledEvents API responded with code {response.status}.")
